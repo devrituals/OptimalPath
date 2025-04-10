@@ -122,6 +122,7 @@ def create_road_folium_map(road_graph=None, path_coords=None, markers=None, path
                 tooltip="Delivery Route",  # Add tooltip for better UX
                 smooth_factor=1.2  # Adjust smooth factor for better path rendering
             ).add_to(m)
+
             
             # Add a second polyline with a different style to create a border effect
             # This makes the route more visible against different backgrounds
