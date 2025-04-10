@@ -17,6 +17,7 @@ This application helps you plan your routes in Marrakech. You can find the short
 or plan an optimal route through multiple locations.
 """)
 
+
 # Create the graph
 G = create_marrakech_sample_graph()
 
