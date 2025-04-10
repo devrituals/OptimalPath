@@ -29,6 +29,7 @@ def create_marrakech_sample_graph():
     # Add nodes with position attributes for visualization
     for loc, coords in locations.items():
         G.add_node(loc, pos=coords)
+
     
     # Add edges with distance (km) and time (minutes) attributes
     # These values are approximated for demonstration
