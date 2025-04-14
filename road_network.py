@@ -1,585 +1,573 @@
-import osmnx as ox
+import os
+import pickle
 import networkx as nx
 import numpy as np
+import traceback
+from math import radians, cos, sin, asin, sqrt
 
-# Configure OSMnx
-# Update to use settings module directly instead of deprecated config function
+# Create a cache directory if it doesn't exist
+os.makedirs('cache', exist_ok=True)
+
+# Try to import osmnx, but provide graceful fallback
 try:
-    # For newer versions of OSMnx
-    ox.settings.use_cache = True
-    ox.settings.log_console = False
-except AttributeError:
-    # For older versions of OSMnx
-    ox.config(use_cache=True, log_console=False)
+    import osmnx as ox
+    OSMNX_AVAILABLE = True
+except ImportError:
+    print("Warning: osmnx package is not available. Road-based routing will use fallback methods.")
+    OSMNX_AVAILABLE = False
 
-def get_road_network(place_name="Marrakech, Morocco", network_type="drive"):
+# Try to import scikit-learn, which is needed by osmnx
+try:
+    import sklearn
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    print("Warning: scikit-learn package is not available. Some road network features will be limited.")
+    SKLEARN_AVAILABLE = False
+
+def haversine_distance(lat1, lon1, lat2, lon2):
     """
-    Get a road network for a specific place using OSMnx.
+    Calculate the great circle distance between two points 
+    on the earth (specified in decimal degrees)
+    """
+    try:
+        # Convert decimal degrees to radians
+        lon1, lat1, lon2, lat2 = map(radians, [float(lon1), float(lat1), float(lon2), float(lat2)])
+        
+        # Haversine formula
+        dlon = lon2 - lon1
+        dlat = lat2 - lat1
+        a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+        c = 2 * asin(sqrt(a))
+        r = 6371  # Radius of earth in kilometers
+        return c * r
+    except Exception as e:
+        print(f"Error calculating haversine distance: {e}")
+        # Return a fallback distance to avoid breaking calculations
+        return 1.0  # Default to 1km if calculation fails
+
+def get_road_network(location, network_type):
+    """
+    Get a road network for a location, with caching for better performance.
+    Enhanced with better street network download options.
     
     Args:
-        place_name: Name of the place to get the road network for
-        network_type: Type of network to get ('drive', 'bike', 'walk', etc.)
+        location: Location name or coordinates
+        network_type: Type of network ('drive', 'walk', 'bike', etc.)
         
     Returns:
         G: NetworkX graph representing the road network
     """
-    import os
-    import pickle
-    from pathlib import Path
-    
-    # Create cache directory if it doesn't exist
-    cache_dir = Path("cache")
-    cache_dir.mkdir(exist_ok=True)
-    
-    # Create a cache filename based on the place name and network type
-    cache_filename = cache_dir / f"{place_name.replace(' ', '_').replace(',', '')}_{network_type}.pkl"
+    # Check if osmnx is available
+    if not OSMNX_AVAILABLE:
+        print("Error: osmnx is required to get road networks. Please install it using 'pip install osmnx'.")
+        return None
+        
+    # Check if scikit-learn is available
+    if not SKLEARN_AVAILABLE:
+        print("Error: scikit-learn is required for road network operations.")
+        print("Please install it using: pip install scikit-learn")
+        return None
+        
+    # Create a safe cache filename
+    cache_file = f'cache/{location.replace(" ", "_").replace(",", "").replace("/", "_")}_{network_type}.pkl'
     
     # Check if the cache file exists
-    if cache_filename.exists():
+    if os.path.exists(cache_file):
         try:
-            with open(cache_filename, 'rb') as f:
-                G = pickle.load(f)
-                print(f"Loaded road network from cache: {cache_filename}")
-                return G
+            print(f"Loaded road network from cache: {cache_file}")
+            with open(cache_file, 'rb') as f:
+                return pickle.load(f)
         except Exception as e:
-            print(f"Error loading cached road network: {e}")
-            # Continue to fetch the network if cache loading fails
+            print(f"Error loading cached network: {e}")
+            # If loading fails, continue to fetch a new network
     
+    # If not cached or loading failed, fetch the network
     try:
-        # Get the road network
-        try:
-            # For newer versions of OSMnx
-            G = ox.graph_from_place(place_name, network_type=network_type)
-        except TypeError:
-            # For older versions of OSMnx
-            G = ox.graph_from_place(place_name, network_type=network_type, simplify=True)
+        print(f"Fetching road network for {location}...")
         
-        # Project the graph to UTM
-        try:
-            # For newer versions of OSMnx
-            G = ox.project_graph(G)
-        except TypeError:
-            # For older versions of OSMnx
-            G = ox.project_graph(G, to_crs=None)
+        # Use more detailed parameters for better road networks
+        # Include additional args to download a more complete network
+        G = ox.graph_from_place(
+            location, 
+            network_type=network_type,
+            simplify=True,  # Simplify the network topology
+            retain_all=False,  # Discard disconnected nodes
+            truncate_by_edge=True,  # Don't truncate nodes, only edges
+            clean_periphery=True,  # Remove peripheral nodes
+        )
         
-        # Add edge speeds and travel times
-        try:
-            # For newer versions of OSMnx
-            G = ox.add_edge_speeds(G)
-            G = ox.add_edge_travel_times(G)
-        except (TypeError, AttributeError):
-            # For older versions of OSMnx
-            G = ox.add_edge_speeds(G, hwy_speeds=None)
-            G = ox.add_edge_travel_times(G, edge_speeds=None)
+        # Add travel time for better route calculation
+        # speeds in km/h
+        speed_dict = {
+            'residential': 30,
+            'primary': 60,
+            'secondary': 50,
+            'tertiary': 40,
+            'unclassified': 30,
+            'trunk': 80,
+            'trunk_link': 50,
+            'motorway': 100,
+            'motorway_link': 60,
+            'living_street': 20
+        }
         
-        # Save the network to cache
+        # Add travel time (in seconds) to edges based on length and speed
+        for u, v, k, data in G.edges(keys=True, data=True):
+            # Get the road type, default to 'residential' if not specified
+            highway_type = data.get('highway', 'residential')
+            if isinstance(highway_type, list):
+                highway_type = highway_type[0]  # Use the first classification if there are multiple
+                
+            # Get the speed for this type of road, default to 30 km/h
+            speed = speed_dict.get(highway_type, 30)
+            
+            # Calculate travel time in seconds (length is in meters, speed in km/h)
+            # Travel time = distance / speed (converted to appropriate units)
+            # Convert speed from km/h to m/s: speed * 1000 / 3600
+            speed_m_s = speed * 1000 / 3600
+            data['travel_time'] = data['length'] / speed_m_s if speed_m_s > 0 else data['length']
+        
+        # Cache the network for future use
         try:
-            with open(cache_filename, 'wb') as f:
+            with open(cache_file, 'wb') as f:
                 pickle.dump(G, f)
-                print(f"Saved road network to cache: {cache_filename}")
+            print(f"Cached road network to {cache_file}")
         except Exception as e:
-            print(f"Error saving road network to cache: {e}")
+            print(f"Error caching network: {e}")
         
         return G
+    except ImportError as e:
+        if "scikit-learn" in str(e):
+            print("Error: scikit-learn is required for road network operations.")
+            print("Please install it using: pip install scikit-learn")
+            return None
     except Exception as e:
-        print(f"Error getting road network: {e}")
+        print(f"Error fetching road network: {e}")
+        traceback.print_exc()
         return None
 
-def get_nearest_node(G, point):
+def get_nearest_node(G, coords):
     """
-    Get the nearest node in the graph to a point.
-    
-    Args:
-        G: NetworkX graph
-        point: (lat, lon) tuple
-        
-    Returns:
-        node_id: ID of the nearest node
-    """
-    try:
-        # Get the nearest node
-        try:
-            # For newer versions of OSMnx
-            node_id = ox.distance.nearest_nodes(G, point[1], point[0])
-        except AttributeError:
-            # For older versions of OSMnx
-            node_id = ox.get_nearest_node(G, point, method='euclidean')
-        return node_id
-    except Exception as e:
-        print(f"Error finding nearest node: {e}")
-        return None
-
-def find_shortest_path_on_road(G, start_point, end_point, weight='travel_time'):
-    """
-    Find the shortest path between two points on the road network using actual road segments.
+    Get the nearest node in the graph to the given coordinates.
+    Handles the case when scikit-learn is not available by using
+    a simple distance calculation instead of OSMnx's built-in function.
     
     Args:
         G: NetworkX graph representing the road network
-        start_point: (lat, lon) tuple for the starting point
-        end_point: (lat, lon) tuple for the ending point
-        weight: Weight to use for shortest path ('travel_time', 'length', etc.)
+        coords: (lat, lon) tuple
+        
+    Returns:
+        nearest_node: Node ID of the nearest node
+    """
+    if G is None:
+        print("Error: Road graph is None")
+        return None
+        
+    try:
+        # Check if osmnx and scikit-learn are available for optimal solution
+        if OSMNX_AVAILABLE and SKLEARN_AVAILABLE:
+            # Try using OSMnx's nearest node function
+            return ox.distance.nearest_nodes(G, coords[1], coords[0])
+        else:
+            print("Using fallback method to find nearest node (dependencies not available)")
+    except ImportError as e:
+        print(f"Import error when finding nearest node: {e}")
+        print("Using fallback method to find nearest node")
+    except Exception as e:
+        print(f"Error using OSMnx to find nearest node: {e}")
+        print("Using fallback method to find nearest node")
+    
+    # Fallback: Calculate distances manually
+    try:
+        min_dist = float('inf')
+        nearest_node = None
+        
+        for node, data in G.nodes(data=True):
+            if 'y' in data and 'x' in data:
+                dist = haversine_distance(coords[0], coords[1], data['y'], data['x'])
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_node = node
+        
+        if nearest_node is not None:
+            return nearest_node
+        else:
+            # Last resort fallback: return the first node
+            return list(G.nodes())[0]
+    except Exception as e:
+        print(f"Error in fallback nearest node method: {e}")
+        traceback.print_exc()
+        # Return a random node as a last resort
+        try:
+            return list(G.nodes())[0]
+        except:
+            return None
+
+def find_shortest_path_on_road(G, start_coords, end_coords, weight='length', route_preference=None, traffic_factor=1.0, vehicle_factor=1.0):
+    """
+    Find the shortest path between two coordinates on the road network.
+    Enhanced with better routing algorithm selection and weight handling.
+    
+    Args:
+        G: NetworkX graph representing the road network
+        start_coords: (lat, lon) tuple for starting point
+        end_coords: (lat, lon) tuple for ending point
+        weight: Edge attribute to minimize ('length' or 'travel_time')
+        route_preference: String indicating routing preference (e.g., "Fastest route", "Avoid highways")
+        traffic_factor: Factor to adjust travel time based on traffic conditions (>1 for heavier traffic)
+        vehicle_factor: Factor to adjust travel time based on vehicle type (<1 for slower vehicles)
         
     Returns:
         path: List of node IDs in the shortest path
-        path_length: Total length/time of the path
-        path_coords: List of (lat, lon) coordinates for the path following actual roads
+        cost: Total cost of the path
+        path_coords: List of (lat, lon) coordinates along the path including road geometries
     """
-    # Input validation
-    if not isinstance(start_point, (list, tuple)) or not isinstance(end_point, (list, tuple)):
-        print(f"Invalid input format: start_point and end_point must be tuples or lists")
-        return None, float('inf'), None
-    
-    if len(start_point) != 2 or len(end_point) != 2:
-        print(f"Invalid coordinates: start_point and end_point must have exactly 2 values")
-        return None, float('inf'), None
-    
+    if G is None:
+        print("Error: Road graph is None")
+        return None, 0, None
+        
     try:
-        # Convert coordinates to float and validate them
-        start_lat, start_lon = float(start_point[0]), float(start_point[1])
-        end_lat, end_lon = float(end_point[0]), float(end_point[1])
-        
-        if not (-90 <= start_lat <= 90 and -180 <= start_lon <= 180 and
-                -90 <= end_lat <= 90 and -180 <= end_lon <= 180):
-            print(f"Warning: Invalid coordinates: start={start_point}, end={end_point}")
-            return None, float('inf'), None
-        
-        # Get the nearest nodes to the start and end points using network topology
-        start_node = ox.distance.nearest_nodes(G, start_lon, start_lat)
-        end_node = ox.distance.nearest_nodes(G, end_lon, end_lat)
-        
-        if start_node is None or end_node is None:
-            print(f"Could not find nearest nodes for {start_point} or {end_point}")
-            return None, float('inf'), None
-        
-        # Find the shortest path using road network topology
-        try:
-            path = nx.shortest_path(G, start_node, end_node, weight=weight)
-            path_length = nx.shortest_path_length(G, start_node, end_node, weight=weight)
+        # Temporarily modify the graph based on route preferences and factors
+        if weight == 'travel_time':
+            # Create a temporary copy of the graph with adjusted weights
+            temp_G = G.copy()
             
-            # Get detailed coordinates for the path following road segments
+            # Apply traffic and vehicle factors to travel times
+            for u, v, k, data in temp_G.edges(keys=True, data=True):
+                if 'travel_time' in data:
+                    # Adjust travel time based on traffic and vehicle
+                    data['adjusted_time'] = data['travel_time'] * traffic_factor / vehicle_factor
+                    
+                    # Apply route preference adjustments
+                    if route_preference:
+                        highway_type = data.get('highway', 'residential')
+                        if isinstance(highway_type, list):
+                            highway_type = highway_type[0]
+                        
+                        # Different preferences modify the weights
+                        if route_preference == "Fastest route":
+                            # No additional adjustments for fastest route
+                            pass
+                        elif route_preference == "Shortest distance":
+                            # For shortest distance, we'll still use the travel time but give less weight to it
+                            data['adjusted_time'] = data['travel_time'] * 0.5 + data['length'] / 10000
+                        elif route_preference == "Prefer main roads":
+                            # Reduce the weight for main roads
+                            if highway_type in ['primary', 'secondary', 'trunk', 'motorway']:
+                                data['adjusted_time'] *= 0.8
+                            elif highway_type in ['residential', 'living_street', 'unclassified']:
+                                data['adjusted_time'] *= 1.2
+                        elif route_preference == "Avoid highways":
+                            # Increase the weight for highways
+                            if highway_type in ['motorway', 'trunk', 'primary']:
+                                data['adjusted_time'] *= 2.0
+                        elif route_preference == "Scenic route":
+                            # Prefer roads near water, parks, etc. (would need additional data)
+                            # This is a simplified approximation
+                            if 'residential' in highway_type or 'tertiary' in highway_type:
+                                data['adjusted_time'] *= 0.9
+            
+            # Use the adjusted time as the weight
+            weight_to_use = 'adjusted_time'
+            G_to_use = temp_G
+        else:
+            # For distance-based routing, use the original graph and weight
+            weight_to_use = weight
+            G_to_use = G
+        
+        # Get the nearest nodes to the coordinates
+        orig_node = get_nearest_node(G_to_use, start_coords)
+        dest_node = get_nearest_node(G_to_use, end_coords)
+        
+        if orig_node is None or dest_node is None:
+            print("Error: Could not find nearest nodes")
+            # Use direct line as fallback
+            distance = haversine_distance(start_coords[0], start_coords[1], end_coords[0], end_coords[1])
+            return [0, 1], distance, [start_coords, end_coords]
+        
+        # Find the shortest path
+        try:
+            # Choose the right algorithm based on the weight
+            if 'time' in weight_to_use:
+                # Use A* for time-based routing which is better for time-based routing
+                # The heuristic function is the straight-line distance divided by the maximum speed
+                # Maximum speed is assumed to be 120 km/h (33.3 m/s)
+                def heuristic(u, v):
+                    u_y, u_x = G_to_use.nodes[u]['y'], G_to_use.nodes[u]['x']
+                    v_y, v_x = G_to_use.nodes[v]['y'], G_to_use.nodes[v]['x']
+                    
+                    # Haversine distance in km
+                    dist_km = haversine_distance(u_y, u_x, v_y, v_x)
+                    
+                    # Convert to meters
+                    dist_m = dist_km * 1000
+                    
+                    # Estimate time in seconds (assuming max speed of 120 km/h = 33.3 m/s)
+                    # Adjust for vehicle type and traffic
+                    max_speed_m_s = 33.3 * vehicle_factor / traffic_factor
+                    estimated_time = dist_m / max_speed_m_s
+                    
+                    return estimated_time
+                
+                try:
+                    # First try A* with heuristic
+                    path = nx.astar_path(G_to_use, orig_node, dest_node, heuristic, weight=weight_to_use)
+                    
+                    # Calculate total cost
+                    cost = 0
+                    for i in range(len(path) - 1):
+                        u, v = path[i], path[i+1]
+                        edge_data = G_to_use.get_edge_data(u, v)
+                        key = list(edge_data.keys())[0]
+                        edge = edge_data[key]
+                        cost += edge.get(weight_to_use, 0)
+                except:
+                    # Fall back to Dijkstra if A* fails
+                    path = nx.dijkstra_path(G_to_use, orig_node, dest_node, weight=weight_to_use)
+                    cost = nx.dijkstra_path_length(G_to_use, orig_node, dest_node, weight=weight_to_use)
+            else:
+                # Default to Dijkstra for distance-based routing
+                path = nx.dijkstra_path(G_to_use, orig_node, dest_node, weight=weight_to_use)
+                cost = nx.dijkstra_path_length(G_to_use, orig_node, dest_node, weight=weight_to_use)
+            
+            # Extract the detailed geometry points along the path
             path_coords = []
-            path_coords.append((start_lat, start_lon))  # Add starting point
             
-            # Add coordinates for each road segment
-            for i in range(len(path)-1):
+            # Add start point
+            path_coords.append(start_coords)
+            
+            # Process each edge in the path to extract its geometry
+            for i in range(len(path) - 1):
                 u, v = path[i], path[i+1]
-                # Get the geometry of the edge if it exists
-                edge_data = G.get_edge_data(u, v)
-                if edge_data and 'geometry' in edge_data[0]:
-                    # If the edge has geometry data, use it for detailed road shape
-                    geom = edge_data[0]['geometry']
-                    coords = list(geom.coords)
-                    # Convert to lat/lon and add to path
-                    for x, y in coords:
-                        path_coords.append((y, x))  # Note: swap x,y to lat,lon
-                else:
-                    # If no geometry, use straight line between nodes
-                    try:
-                        y = float(G.nodes[v]['y'])
-                        x = float(G.nodes[v]['x'])
-                        if -90 <= y <= 90 and -180 <= x <= 180:
-                            path_coords.append((y, x))
-                    except (KeyError, ValueError, TypeError) as e:
-                        print(f"Warning: Could not get coordinates for node {v}: {e}")
-                        continue
-            
-            path_coords.append((end_lat, end_lon))  # Add ending point
-            
-            # Remove duplicate consecutive coordinates while preserving path shape
-            path_coords = [coord for i, coord in enumerate(path_coords)
-                          if i == 0 or coord != path_coords[i-1]]
-            
-            return path, path_length, path_coords
-            
-        except nx.NetworkXNoPath:
-            print(f"No path found between nodes {start_node} and {end_node}")
-            return None, float('inf'), None
-            
-    except Exception as e:
-        print(f"Error in find_shortest_path_on_road: {e}")
-        return None, float('inf'), None
-        
-        # Calculate the path length
-        try:
-            # Sum the weights along the path
-            path_length = 0
-            for i in range(len(path)-1):
-                try:
-                    # Get the weight for this edge
-                    edge_weight = G[path[i]][path[i+1]][0][weight]
-                    # Add to total path length
-                    path_length += edge_weight
-                except (KeyError, TypeError) as e:
-                    print(f"Error getting weight for edge ({path[i]}, {path[i+1]}): {e}")
-                    # Skip this edge if there's an error
-                    continue
-            
-            # Convert length from meters to kilometers if using 'length' weight
-            if weight == 'length':
-                path_length = path_length / 1000.0  # Convert meters to kilometers
                 
-            # Ensure path_length is a reasonable value
-            if path_length <= 0 or path_length > 10000:  # Sanity check
-                print(f"Warning: Calculated path length {path_length} seems incorrect, using fallback")
-                # Fallback: estimate distance based on number of segments
-                path_length = len(path) * 0.5  # Rough estimate
-        except Exception as e:
-            print(f"Error calculating path length: {e}")
-            # Fallback to a default weight if the specified one is not available
-            fallback_weight = 'length' if weight == 'travel_time' else 'travel_time'
-            try:
-                path_length = 0
-                for i in range(len(path)-1):
-                    try:
-                        edge_weight = G[path[i]][path[i+1]][0][fallback_weight]
-                        path_length += edge_weight
-                    except (KeyError, TypeError):
-                        # Skip this edge if there's an error
-                        continue
-                
-                # Convert length from meters to kilometers if using 'length' fallback
-                if fallback_weight == 'length':
-                    path_length = path_length / 1000.0  # Convert meters to kilometers
-            except Exception as e:
-                print(f"Error calculating path length with fallback weight: {e}")
-                # If all else fails, just count the number of edges
-                path_length = len(path) * 0.5  # More reasonable estimate (0.5 km per edge)
-        
-        # Get the path coordinates with more detail for road segments
-        path_coords = []
-        
-        # Validate and add the starting point
-        try:
-            start_lat, start_lon = float(start_point[0]), float(start_point[1])
-            if -90 <= start_lat <= 90 and -180 <= start_lon <= 180:
-                path_coords.append((start_lat, start_lon))
-            else:
-                print(f"Warning: Invalid start point coordinates: {start_point}")
-                return None, float('inf'), None
-        except (ValueError, TypeError) as e:
-            print(f"Error processing start point coordinates: {e}")
-            return None, float('inf'), None
-        
-        # Then add the first node's coordinates
-        try:
-            start_y, start_x = float(G.nodes[path[0]]['y']), float(G.nodes[path[0]]['x'])
-            # Validate coordinates
-            if -90 <= start_y <= 90 and -180 <= start_x <= 180:
-                # Only add if it's significantly different from the start point
-                if abs(start_y - path_coords[0][0]) > 1e-5 or abs(start_x - path_coords[0][1]) > 1e-5:
-                    path_coords.append((start_y, start_x))  # (lat, lon)
-            else:
-                print(f"Warning: Invalid coordinates for node {path[0]}: y={start_y}, x={start_x}")
-        except (KeyError, ValueError, TypeError) as e:
-            print(f"Error processing coordinates for node {path[0]}: {e}")
-            # Continue without adding this point
-        
-        # Add intermediate points along each edge in the path
-        for i in range(len(path)-1):
-            u, v = path[i], path[i+1]
-            
-            try:
-                # Check if there's geometry data for this edge
-                if 'geometry' in G[u][v][0]:
-                    # Extract all points from the LineString geometry
-                    geom = G[u][v][0]['geometry']
-                    # Get all points from the geometry
-                    coords = list(geom.coords)
+                # Check if this edge exists in the graph (it should)
+                if G_to_use.has_edge(u, v):
+                    # Get edge data (might have multiple edges between nodes)
+                    edge_data = G_to_use.get_edge_data(u, v)
                     
-                    if coords:
-                        # For the first edge, include all points
-                        if i == 0:
-                            for point in coords:
-                                # Note: point is (x, y) but we need (y, x) for (lat, lon)
-                                lat, lon = point[1], point[0]
-                                # Validate coordinates before adding
-                                if -90 <= lat <= 90 and -180 <= lon <= 180:
-                                    path_coords.append((lat, lon))
+                    # Get the first edge key (usually 0)
+                    key = list(edge_data.keys())[0]
+                    edge = edge_data[key]
+                    
+                    # Check if there's geometry data for this edge
+                    if 'geometry' in edge and edge['geometry'] is not None:
+                        # Extract all points from the LineString geometry
+                        # The coords are in (lon, lat) format, so we need to swap them
+                        geom_coords = [(point[1], point[0]) for point in list(edge['geometry'].coords)]
+                        
+                        # Add all intermediate points except the last one (to avoid duplicates)
+                        if i < len(path) - 2:
+                            path_coords.extend(geom_coords[:-1])
                         else:
-                            # For subsequent edges, skip the first point to avoid duplication
-                            # but only if it's very close to the last point we added
-                            if path_coords:  # Make sure we have at least one point already
-                                last_point = path_coords[-1]
-                                first_geom_point = (coords[0][1], coords[0][0])  # Convert to (lat, lon)
-                                
-                                # Check if the first point of this geometry is already in our path
-                                if abs(last_point[0] - first_geom_point[0]) < 1e-6 and abs(last_point[1] - first_geom_point[1]) < 1e-6:
-                                    # Skip the first point as it's a duplicate
-                                    for point in coords[1:]:
-                                        lat, lon = point[1], point[0]
-                                        if -90 <= lat <= 90 and -180 <= lon <= 180:
-                                            path_coords.append((lat, lon))
-                                else:
-                                    # Include all points as there's a gap
-                                    for point in coords:
-                                        lat, lon = point[1], point[0]
-                                        if -90 <= lat <= 90 and -180 <= lon <= 180:
-                                            path_coords.append((lat, lon))
-                            else:
-                                # If path_coords is empty, add all points
-                                for point in coords:
-                                    lat, lon = point[1], point[0]
-                                    if -90 <= lat <= 90 and -180 <= lon <= 180:
-                                        path_coords.append((lat, lon))
+                            # For the last segment, include all points
+                            path_coords.extend(geom_coords)
+                    else:
+                        # If no geometry, just use node coordinates
+                        if i == len(path) - 2:  # Last segment
+                            u_y, u_x = G_to_use.nodes[u]['y'], G_to_use.nodes[u]['x']
+                            v_y, v_x = G_to_use.nodes[v]['y'], G_to_use.nodes[v]['x']
+                            path_coords.extend([(u_y, u_x), (v_y, v_x)])
+                        else:
+                            u_y, u_x = G_to_use.nodes[u]['y'], G_to_use.nodes[u]['x']
+                            path_coords.append((u_y, u_x))
                 else:
-                    # If no geometry, just add the end node of this segment
+                    # This shouldn't happen, but just in case
                     try:
-                        y, x = float(G.nodes[v]['y']), float(G.nodes[v]['x'])
-                        if -90 <= y <= 90 and -180 <= x <= 180:
-                            path_coords.append((y, x))  # (lat, lon)
-                    except (ValueError, TypeError) as e:
-                        print(f"Error converting coordinates for node {v}: {e}")
-            except (KeyError, AttributeError) as e:
-                print(f"Error extracting coordinates for edge ({u}, {v}): {e}")
-                # Fallback to just adding the end node
-                try:
-                    y, x = float(G.nodes[v]['y']), float(G.nodes[v]['x'])
-                    if -90 <= y <= 90 and -180 <= x <= 180:
-                        path_coords.append((y, x))  # (lat, lon)
-                except (KeyError, ValueError, TypeError) as e:
-                    print(f"Error processing coordinates for node {v}: {e}")
-                    continue
-        
-        # Add the exact end point coordinates at the end
-        # This helps connect the path to the actual destination marker
-        # Get the last node's coordinates
-        try:
-            last_y, last_x = float(G.nodes[path[-1]]['y']), float(G.nodes[path[-1]]['x'])
-            # Validate coordinates
-            if -90 <= last_y <= 90 and -180 <= last_x <= 180:
-                # Only add if it's not already the last point in the path
-                if path_coords and (abs(path_coords[-1][0] - last_y) > 1e-5 or abs(path_coords[-1][1] - last_x) > 1e-5):
-                    path_coords.append((last_y, last_x))
-        except (KeyError, ValueError, TypeError) as e:
-            print(f"Error processing coordinates for end node {path[-1]}: {e}")
-        
-        # Add the exact end point
-        try:
-            end_lat, end_lon = float(end_point[0]), float(end_point[1])
-            if -90 <= end_lat <= 90 and -180 <= end_lon <= 180:
-                # Only add if it's different from the last point we added
-                if not path_coords or (abs(path_coords[-1][0] - end_lat) > 1e-5 or abs(path_coords[-1][1] - end_lon) > 1e-5):
-                    path_coords.append((end_lat, end_lon))
-        except (ValueError, TypeError) as e:
-            print(f"Error processing end point coordinates: {e}")
-        
-        # Remove any duplicate consecutive points while ensuring path continuity
-        if len(path_coords) > 1:
-            unique_coords = [path_coords[0]]
-            for i in range(1, len(path_coords)):
-                curr = path_coords[i]
-                prev = path_coords[i-1]
-                
-                # Only add if it's different from the previous point
-                # Use a slightly larger threshold to avoid nearly identical points
-                if abs(curr[0] - prev[0]) > 1e-6 or abs(curr[1] - prev[1]) > 1e-6:
-                    unique_coords.append(curr)
-                    
-                # If we're at a junction point (where paths might connect),
-                # make sure we don't have a large gap to the next point
-                elif i < len(path_coords) - 1:
-                    next_point = path_coords[i+1]
-                    # If there's a significant gap between current and next point,
-                    # keep the current point to maintain path continuity
-                    if abs(curr[0] - next_point[0]) > 1e-5 or abs(curr[1] - next_point[1]) > 1e-5:
-                        unique_coords.append(curr)
+                        u_y, u_x = G_to_use.nodes[u]['y'], G_to_use.nodes[u]['x']
+                        v_y, v_x = G_to_use.nodes[v]['y'], G_to_use.nodes[v]['x']
+                        path_coords.extend([(u_y, u_x), (v_y, v_x)])
+                    except KeyError:
+                        print(f"Error: Missing coordinate data for nodes {u} or {v}")
             
-            path_coords = unique_coords
+            # Add end point to ensure it's included
+            path_coords.append(end_coords)
             
-            # Ensure we have at least 2 points to draw a path
-            if len(path_coords) < 2:
-                print("Warning: Not enough valid coordinates to draw path after filtering")
-                # Try to add at least the start and end points
-                path_coords = []
-                try:
-                    start_lat, start_lon = float(start_point[0]), float(start_point[1])
-                    end_lat, end_lon = float(end_point[0]), float(end_point[1])
-                    if (-90 <= start_lat <= 90 and -180 <= start_lon <= 180 and
-                        -90 <= end_lat <= 90 and -180 <= end_lon <= 180):
-                        path_coords = [(start_lat, start_lon), (end_lat, end_lon)]
-                except (ValueError, TypeError) as e:
-                    print(f"Error creating fallback path: {e}")
-                    return None, float('inf'), None
+            # Remove duplicate consecutive points
+            cleaned_path_coords = []
+            for i, coord in enumerate(path_coords):
+                if i == 0 or coord != path_coords[i-1]:
+                    cleaned_path_coords.append(coord)
+            
+            # Convert cost to km if using length, or minutes if using travel_time
+            if weight == 'length' or weight_to_use == 'length':
+                cost = cost / 1000  # Convert from meters to kilometers
+            elif 'time' in weight_to_use:
+                cost = cost / 60  # Convert from seconds to minutes
+            
+            return path, cost, cleaned_path_coords
         
-        return path, path_length, path_coords
-    except nx.NetworkXNoPath:
-        print(f"No path found between {start_point} and {end_point}")
-        return None, float('inf'), None
+        except nx.NetworkXNoPath:
+            print(f"No path exists between the given coordinates")
+            # Use direct line as fallback
+            distance = haversine_distance(start_coords[0], start_coords[1], end_coords[0], end_coords[1])
+            return [0, 1], distance, [start_coords, end_coords]
+        
+    except ImportError as e:
+        if "scikit-learn" in str(e):
+            print("Error in find_shortest_path_on_road: scikit-learn must be installed to search an unprojected graph")
+            # Fallback to straight-line distance
+            distance = haversine_distance(start_coords[0], start_coords[1], end_coords[0], end_coords[1])
+            return [0, 1], distance, [start_coords, end_coords]
+        else:
+            print(f"Import error: {e}")
+            return None, 0, None
     except Exception as e:
-        print(f"Error finding shortest path: {e}")
-        return None, float('inf'), None
+        print(f"Error finding shortest path on road: {e}")
+        traceback.print_exc()
+        # Use direct line as fallback
+        distance = haversine_distance(start_coords[0], start_coords[1], end_coords[0], end_coords[1])
+        return [0, 1], distance, [start_coords, end_coords]
 
-def create_distance_matrix_on_road(G, location_coords, weight='travel_time'):
+def create_distance_matrix_on_road(G, coords_list, weight='length', traffic_factor=1.0, vehicle_factor=1.0):
     """
-    Create a distance matrix for the given locations using the road network.
+    Create a distance matrix for the given coordinates using road distances.
     
     Args:
         G: NetworkX graph representing the road network
-        location_coords: List of (lat, lon) coordinates
-        weight: Weight to use for shortest path ('travel_time', 'length', etc.)
+        coords_list: List of (lat, lon) tuples
+        weight: Edge attribute to minimize ('length' or 'travel_time')
+        traffic_factor: Factor to adjust travel time based on traffic conditions (>1 for heavier traffic)
+        vehicle_factor: Factor to adjust travel time based on vehicle type (<1 for slower vehicles)
         
     Returns:
-        distance_matrix: 2D array of distances between locations
-        paths_dict: Dictionary containing paths and coordinates for each route
+        distance_matrix: 2D array of distances between coordinates
+        paths_dict: Dictionary of (i,j) -> (path, coords) for path visualization
     """
-    # Input validation and initialization
-    n = len(location_coords)
+    if G is None:
+        print("Error: Road graph is None, using straight-line distances")
+        # Return straight-line distance matrix as fallback
+        return create_straight_line_distance_matrix(coords_list), {}
+        
+    n = len(coords_list)
     distance_matrix = np.zeros((n, n))
     paths_dict = {}
     
-    # Get nearest nodes for all locations once
-    nearest_nodes = []
-    for lat, lon in location_coords:
-        try:
-            node = ox.distance.nearest_nodes(G, lon, lat)
-            nearest_nodes.append(node)
-        except Exception as e:
-            print(f"Error finding nearest node for ({lat}, {lon}): {e}")
-            return None, None
-    # Calculate distances between all pairs of locations
+    try:
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    try:
+                        # Pass traffic and vehicle factors to the path finding function
+                        path, cost, path_coords = find_shortest_path_on_road(
+                            G, coords_list[i], coords_list[j], weight, 
+                            traffic_factor=traffic_factor, 
+                            vehicle_factor=vehicle_factor
+                        )
+                        
+                        if path:
+                            # Apply traffic and vehicle factors to the cost if using travel_time
+                            if weight == 'travel_time':
+                                # Adjust travel time based on traffic and vehicle factors
+                                cost = cost * traffic_factor / vehicle_factor
+                            elif weight == 'balanced':
+                                # For balanced, we'll use a weighted average of distance and time
+                                # First get the distance
+                                _, distance_cost, _ = find_shortest_path_on_road(
+                                    G, coords_list[i], coords_list[j], 'length'
+                                )
+                                # Then get the time (adjusted by factors)
+                                _, time_cost, _ = find_shortest_path_on_road(
+                                    G, coords_list[i], coords_list[j], 'travel_time'
+                                )
+                                time_cost = time_cost * traffic_factor / vehicle_factor
+                                
+                                # Weighted average (60% time, 40% distance)
+                                cost = 0.6 * time_cost + 0.4 * distance_cost
+                            
+                            distance_matrix[i][j] = cost
+                            paths_dict[(i, j)] = (path, path_coords)
+                        else:
+                            # If no path exists, use straight-line distance as fallback
+                            straight_line_dist = haversine_distance(
+                                coords_list[i][0], coords_list[i][1], 
+                                coords_list[j][0], coords_list[j][1]
+                            )
+                            distance_matrix[i][j] = straight_line_dist
+                            paths_dict[(i, j)] = ([i, j], [coords_list[i], coords_list[j]])
+                    except Exception as e:
+                        print(f"Error computing distance from {i} to {j}: {e}")
+                        # Use straight-line distance as fallback
+                        straight_line_dist = haversine_distance(
+                            coords_list[i][0], coords_list[i][1], 
+                            coords_list[j][0], coords_list[j][1]
+                        )
+                        distance_matrix[i][j] = straight_line_dist
+                        paths_dict[(i, j)] = ([i, j], [coords_list[i], coords_list[j]])
+        
+        return distance_matrix, paths_dict
+    
+    except ImportError as e:
+        if "scikit-learn" in str(e):
+            print("Error in create_distance_matrix_on_road: scikit-learn must be installed")
+            # Fallback to straight-line distances
+            return create_straight_line_distance_matrix(coords_list), create_straight_line_paths_dict(coords_list)
+        else:
+            print(f"Import error: {e}")
+            return np.ones((n, n)) * 999999, {}
+    except Exception as e:
+        print(f"Error creating distance matrix: {e}")
+        traceback.print_exc()
+        # Fallback to straight-line distances
+        return create_straight_line_distance_matrix(coords_list), create_straight_line_paths_dict(coords_list)
+
+def create_straight_line_distance_matrix(coords_list):
+    """
+    Create a distance matrix using straight-line (haversine) distances
+    
+    Args:
+        coords_list: List of (lat, lon) tuples
+        
+    Returns:
+        distance_matrix: 2D array of distances between coordinates
+    """
+    n = len(coords_list)
+    distance_matrix = np.zeros((n, n))
+    
     for i in range(n):
         for j in range(n):
             if i != j:
-                try:
-                    # Find shortest path between locations using road network
-                    path = nx.shortest_path(G, nearest_nodes[i], nearest_nodes[j], weight=weight)
-                    path_length = nx.shortest_path_length(G, nearest_nodes[i], nearest_nodes[j], weight=weight)
-                    
-                    # Get detailed path coordinates following road segments
-                    path_coords = []
-                    path_coords.append(location_coords[i])  # Add start point
-                    
-                    # Add coordinates for each road segment
-                    for k in range(len(path)-1):
-                        u, v = path[k], path[k+1]
-                        # Get the geometry of the edge if it exists
-                        edge_data = G.get_edge_data(u, v)
-                        if edge_data and 'geometry' in edge_data[0]:
-                            # If the edge has geometry data, use it for detailed road shape
-                            geom = edge_data[0]['geometry']
-                            coords = list(geom.coords)
-                            # Convert to lat/lon and add to path
-                            for x, y in coords:
-                                path_coords.append((y, x))  # Note: swap x,y to lat,lon
-                        else:
-                            # If no geometry, use straight line between nodes
-                            try:
-                                y = float(G.nodes[v]['y'])
-                                x = float(G.nodes[v]['x'])
-                                if -90 <= y <= 90 and -180 <= x <= 180:
-                                    path_coords.append((y, x))
-                            except (KeyError, ValueError, TypeError) as e:
-                                print(f"Warning: Could not get coordinates for node {v}: {e}")
-                                continue
-                    
-                    path_coords.append(location_coords[j])  # Add end point
-                    
-                    # Remove duplicate consecutive coordinates while preserving path shape
-                    path_coords = [coord for k, coord in enumerate(path_coords)
-                                  if k == 0 or coord != path_coords[k-1]]
-                    
-                    # Store the path and its coordinates
-                    distance_matrix[i][j] = path_length
-                    paths_dict[(i, j)] = (path, path_coords)
-                    
-                except nx.NetworkXNoPath:
-                    print(f"No path found between locations {i} and {j}")
-                    distance_matrix[i][j] = float('inf')
-                except Exception as e:
-                    print(f"Error finding path between locations {i} and {j}: {e}")
-                    distance_matrix[i][j] = float('inf')
-            else:
-                distance_matrix[i][j] = 0
-    import time
-    start_time = time.time()
+                distance_matrix[i][j] = haversine_distance(
+                    coords_list[i][0], coords_list[i][1], 
+                    coords_list[j][0], coords_list[j][1]
+                )
     
-    # Input validation and initialization
-    if not location_coords or len(location_coords) == 0:
-        print("Error: No location coordinates provided")
-        return None, None
-        
-    n = len(location_coords)
-    distance_matrix = np.zeros((n, n))
-    paths = {}
-    
-    # First, get all nearest nodes to avoid redundant calculations
-    nearest_nodes = []
-    for loc in location_coords:
-        node = get_nearest_node(G, loc)
-        if node is None:
-            print(f"Warning: Could not find nearest node for location {loc}")
-            # Use a placeholder node ID that will be skipped later
-            nearest_nodes.append(-1)
-        else:
-            nearest_nodes.append(node)
-    
-    # Calculate paths between all pairs of locations
-    for i in range(n):
-        if nearest_nodes[i] == -1:
-            # Skip invalid nodes
-            for j in range(n):
-                if i != j:
-                    distance_matrix[i][j] = 999999
-            continue
-            
-        for j in range(n):
-            if i == j:
-                # Zero distance for same location
-                distance_matrix[i][j] = 0
-                continue
-                
-            if nearest_nodes[j] == -1:
-                # Skip invalid nodes
-                distance_matrix[i][j] = 999999
-                continue
-            
-            # Check if we already calculated the reverse path (j->i)
-            if (j, i) in paths:
-                # Reuse the reverse path
-                reverse_path, reverse_coords = paths[(j, i)]
-                if reverse_path:
-                    # Reverse the path and coordinates
-                    path = list(reversed(reverse_path))
-                    coords = list(reversed(reverse_coords))
-                    cost = distance_matrix[j][i]  # Use the same cost
-                    distance_matrix[i][j] = cost
-                    paths[(i, j)] = (path, coords)
-                else:
-                    distance_matrix[i][j] = 999999
-                continue
-            
-            # Calculate the path
-            path, cost, coords = find_shortest_path_on_road(G, location_coords[i], location_coords[j], weight)
-            if path is None or not coords or len(coords) < 2:
-                # If no path exists or invalid coordinates, set a very large value
-                distance_matrix[i][j] = 999999
-            else:
-                # Note: cost is already converted to km in find_shortest_path_on_road if weight is 'length'
-                distance_matrix[i][j] = cost
-                paths[(i, j)] = (path, coords)
-    
-    end_time = time.time()
-    print(f"Distance matrix calculation took {end_time - start_time:.2f} seconds")
-    
-    return distance_matrix.astype(int), paths
+    return distance_matrix
 
-def convert_marrakech_graph_to_coordinates(marrakech_graph):
+def create_straight_line_paths_dict(coords_list):
     """
-    Convert the Marrakech graph to a dictionary of location names and coordinates.
+    Create a paths dictionary using straight lines between coordinates
     
     Args:
-        marrakech_graph: NetworkX graph from create_marrakech_sample_graph()
+        coords_list: List of (lat, lon) tuples
         
     Returns:
-        locations_dict: Dictionary of location names and (lat, lon) tuples
+        paths_dict: Dictionary of (i,j) -> (path, coords) for path visualization
     """
-    # Get positions from node attributes
-    pos = nx.get_node_attributes(marrakech_graph, 'pos')
+    n = len(coords_list)
+    paths_dict = {}
     
-    # Create a dictionary of location names and coordinates
-    locations_dict = {}
-    for node in marrakech_graph.nodes():
-        lat, lon = pos[node]
-        locations_dict[node] = (lat, lon)
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                # Create a simple path with just start and end points
+                paths_dict[(i, j)] = ([i, j], [coords_list[i], coords_list[j]])
     
-    return locations_dict
+    return paths_dict
+
+def convert_marrakech_graph_to_coordinates(G):
+    """
+    Convert the Marrakech graph to a dictionary of location -> coordinates
+    
+    Args:
+        G: NetworkX graph representing Marrakech
+        
+    Returns:
+        coords_dict: Dictionary mapping location names to (lat, lon) tuples
+    """
+    coords_dict = {}
+    pos = nx.get_node_attributes(G, 'pos')
+    
+    for node, coords in pos.items():
+        coords_dict[node] = coords
+    
+    return coords_dict
