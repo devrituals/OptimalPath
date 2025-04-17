@@ -2,6 +2,7 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import numpy as np
 from ortools.constraint_solver import routing_enums_pb2, pywrapcp
+from math import radians, sin, cos, sqrt, atan2
 
 # Step 1: Create a simple graph representing key locations in Marrakech
 def create_marrakech_sample_graph():
@@ -29,7 +30,6 @@ def create_marrakech_sample_graph():
     # Add nodes with position attributes for visualization
     for loc, coords in locations.items():
         G.add_node(loc, pos=coords)
-
     
     # Add edges with distance (km) and time (minutes) attributes
     # These values are approximated for demonstration
@@ -75,6 +75,24 @@ def find_shortest_path(graph, start, end, cost_type='distance'):
         return path, cost
     except nx.NetworkXNoPath:
         return None, float('inf')
+    except Exception as e:
+        print(f"Error finding shortest path: {e}")
+        return None, float('inf')
+
+# Utility function to calculate direct distance between coordinates
+def calculate_haversine_distance(lat1, lon1, lat2, lon2):
+    """Calculate the great circle distance between two points"""
+    # Convert decimal degrees to radians
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    
+    # Haversine formula
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1-a))
+    distance = 6371 * c  # Radius of Earth in kilometers
+    
+    return distance
 
 # Step 3: Implement TSP for multi-stop optimization
 def create_distance_matrix(graph, locations, cost_type='distance'):
@@ -102,7 +120,13 @@ def create_distance_matrix(graph, locations, cost_type='distance'):
                 else:
                     distance_matrix[i][j] = cost
     
-    return distance_matrix.astype(int)
+    # Ensure no zero distances (other than diagonal)
+    for i in range(n):
+        for j in range(n):
+            if i != j and distance_matrix[i][j] < 0.001:
+                distance_matrix[i][j] = 0.001
+                
+    return distance_matrix
 
 def solve_tsp(distance_matrix, start_index=0, delivery_person_location=None, locations=None):
     """
@@ -119,24 +143,41 @@ def solve_tsp(distance_matrix, start_index=0, delivery_person_location=None, loc
     """
     n = len(distance_matrix)
     
-    # If delivery person location is provided, find the nearest location to start from
+    # If delivery person location is provided and locations list is provided
     if delivery_person_location and locations:
-        # Create a graph to find distances from delivery person to all locations
-        G = create_marrakech_sample_graph()
-        
-        # Find the nearest location to the delivery person
-        min_distance = float('inf')
-        nearest_index = 0
-        
-        for i, loc in enumerate(locations):
-            path, cost = find_shortest_path(G, delivery_person_location, loc, 'distance')
-            if path and cost < min_distance:
-                min_distance = cost
-                nearest_index = i
-        
-        # Set the nearest location as the starting point
-        start_index = nearest_index
+        if delivery_person_location == "Current Location":
+            # We're using geolocation coordinates instead of a named location
+            # Just use the start_index (0) as the starting point
+            print("Using current location as starting point")
+            pass
+        else:
+            try:
+                # Create a graph to find distances from delivery person to all locations
+                G = create_marrakech_sample_graph()
+                
+                # Check if delivery person location is in the graph
+                if delivery_person_location not in G.nodes():
+                    print(f"Warning: {delivery_person_location} not found in the graph. Using first location as start.")
+                    start_index = 0
+                else:
+                    # Find the nearest location to the delivery person
+                    min_distance = float('inf')
+                    nearest_index = 0
+                    
+                    for i, loc in enumerate(locations):
+                        path, cost = find_shortest_path(G, delivery_person_location, loc, 'distance')
+                        if path and cost < min_distance:
+                            min_distance = cost
+                            nearest_index = i
+                    
+                    # Set the nearest location as the starting point
+                    start_index = nearest_index
+            except Exception as e:
+                print(f"Error setting start location: {e}")
+                # Default to first location if there's an error
+                start_index = 0
     
+    # Create the routing model
     manager = pywrapcp.RoutingIndexManager(n, 1, start_index)
     routing = pywrapcp.RoutingModel(manager)
     

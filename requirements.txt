@@ -8,3 +8,4 @@ numpy==1.24.3
 pandas==2.0.2
 folium==0.14.0
 streamlit-folium==0.15.0
+streamlit-js-eval>=0.1.5
