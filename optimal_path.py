@@ -54,6 +54,7 @@ def create_marrakech_sample_graph():
     G.add_edges_from(edges)
     return G
 
+
 # Step 2: Implement Dijkstra's algorithm for shortest path
 def find_shortest_path(graph, start, end, cost_type='distance'):
     """
@@ -78,6 +79,7 @@ def find_shortest_path(graph, start, end, cost_type='distance'):
     except Exception as e:
         print(f"Error finding shortest path: {e}")
         return None, float('inf')
+
 
 # Utility function to calculate direct distance between coordinates
 def calculate_haversine_distance(lat1, lon1, lat2, lon2):
@@ -205,6 +207,7 @@ def solve_tsp(distance_matrix, start_index=0, delivery_person_location=None, loc
         return route
     return None
 
+
 # Step 4: Visualize the route
 def plot_graph(graph, path=None, title="Marrakech Map"):
     """
@@ -236,6 +239,7 @@ def plot_graph(graph, path=None, title="Marrakech Map"):
     plt.tight_layout()
     plt.savefig('marrakech_route.png')
     plt.close()
+
 
 # Main function to test the implementation
 def main():
