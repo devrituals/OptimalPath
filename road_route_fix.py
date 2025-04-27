@@ -16,6 +16,7 @@ def calculate_haversine_distance(lat1, lon1, lat2, lon2):
     
     return distance
 
+
 def get_nearest_node_fixed(G, point):
     """
     Get the nearest node in the graph to a point.
@@ -78,6 +79,7 @@ def get_nearest_node_fixed(G, point):
     except Exception as e:
         print(f"Error finding nearest node: {e}")
         return None
+
 
 def find_road_path_fixed(G, start_coords, end_coords, weight='length'):
     """
@@ -214,6 +216,7 @@ def find_road_path_fixed(G, start_coords, end_coords, weight='length'):
         print(f"Error in find_road_path: {e}")
         return None, 0, [start_coords, end_coords]
 
+
 def get_node_coords(G, node):
     """Get coordinates for a node trying different attribute names"""
     try:
@@ -230,6 +233,7 @@ def get_node_coords(G, node):
         return None
     except:
         return None
+
 
 def draw_route_on_map(m, route_coords, color='blue', weight=5, opacity=0.7, route_name="Route"):
     """
