@@ -39,6 +39,7 @@ def get_road_network(place_name="Marrakech, Morocco", network_type="drive", forc
     # Create a cache filename based on the place name and network type
     safe_place_name = place_name.replace(' ', '_').replace(',', '').replace('/', '_')
     cache_filename = cache_dir / f"{safe_place_name}_{network_type}.pkl"
+
     
     # Check if the cache file exists and we're not forcing a refresh
     if cache_filename.exists() and not force_refresh:
@@ -142,6 +143,7 @@ def get_road_network(place_name="Marrakech, Morocco", network_type="drive", forc
     # If all attempts fail, create a simplified fallback network
     return create_fallback_network()
 
+
 def create_fallback_network():
     """
     Create a simplified fallback network for Marrakech when OSMnx fails.
@@ -191,6 +193,7 @@ def create_fallback_network():
     
     print(f"Created fallback network with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
     return G
+
 
 def get_nearest_node(G, point):
     """
@@ -409,6 +412,7 @@ def find_shortest_path_on_road(G, start_point, end_point, weight='travel_time'):
             # Convert length from meters to kilometers if using 'length' weight
             if weight == 'length':
                 path_length = path_length / 1000.0  # Convert meters to kilometers
+
             
             # Ensure path_length is positive and reasonable
             if path_length <= 0:
