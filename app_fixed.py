@@ -73,6 +73,7 @@ def get_road_network(place_name="Marrakech, Morocco", network_type="drive", forc
         
         # Project the graph to use consistent distance units
         G = ox.project_graph(G)
+
         
         # Save to cache
         try:
@@ -88,6 +89,7 @@ def get_road_network(place_name="Marrakech, Morocco", network_type="drive", forc
         if st.session_state.debug_mode:
             st.error(traceback.format_exc())
         return create_fallback_network()
+
 
 def create_fallback_network():
     """Create a minimal fallback network of Marrakech landmarks"""
@@ -133,6 +135,7 @@ def find_shortest_path_exact(G, start_coords, end_coords, weight='length'):
     """
     Find the most accurate road-following path between two points using an improved method
     that tries multiple nearby nodes to find the truly shortest route.
+
     
     Args:
         G: NetworkX graph representing the road network
@@ -218,6 +221,7 @@ def find_shortest_path_exact(G, start_coords, end_coords, weight='length'):
                     length = sum(ox.utils_graph.get_route_edge_attributes(G, route, 'travel_time'))
                     # Convert to minutes
                     length = length / 60
+
                 
                 # Keep the best route
                 if length < best_length:
