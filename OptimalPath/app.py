@@ -356,6 +356,7 @@ def setup_location_tracking():
     
     # Use Streamlit's html component to inject JavaScript
     html(tracking_js, height=150)
+
 def create_map(route, route_paths=None, map_provider="OpenStreetMap"):
     """
     Create a folium map with the route.
@@ -390,25 +391,55 @@ def create_map(route, route_paths=None, map_provider="OpenStreetMap"):
     
     m = folium.Map(location=[center_lat, center_lng], zoom_start=10, tiles=tiles)
     
-    # Add stops as markers
-    for i, stop in enumerate(route):
-        if 'latitude' not in stop or 'longitude' not in stop:
-            continue
-            
+    # Track which stops have valid coordinates to ensure proper numbering
+    valid_stops = []
+    for stop in route:
+        if 'latitude' in stop and 'longitude' in stop:
+            valid_stops.append(stop)
+    
+    # Add stops as markers with numbers
+    for i, stop in enumerate(valid_stops):
         popup_text = f"{stop['name']}<br>{stop['address']}"
         
-        # Use different icon for start/end if we have an optimized route
-        if st.session_state.optimized_route and i == 0:
-            folium.Marker(
-                [stop['latitude'], stop['longitude']], 
-                popup=popup_text,
-                icon=folium.Icon(color='green', icon='play')
-            ).add_to(m)
+        # Set marker style and text
+        if i == 0:
+            # First stop is always the starting point
+            bg_color = "#38761d"  # green for start
+            text_color = "white"
+            marker_text = "S"  # S for Start
         else:
-            folium.Marker(
-                [stop['latitude'], stop['longitude']], 
-                popup=popup_text
-            ).add_to(m)
+            # Regular numbered stops - number sequentially
+            bg_color = "white"
+            text_color = "black"
+            # Use i instead of i+1 to ensure consecutive numbering
+            marker_text = str(i)  # This will give 1, 2, 3...
+        
+        # Create HTML for the marker
+        icon_html = f'''
+            <div style="
+                font-size: 12pt; 
+                background-color: {bg_color}; 
+                color: {text_color};
+                border: 2px solid black; 
+                border-radius: 50%; 
+                width: 30px; 
+                height: 30px; 
+                line-height: 28px; 
+                text-align: center;
+                box-shadow: 0 0 3px rgba(0,0,0,0.4);
+            "><b>{marker_text}</b></div>
+        '''
+        
+        # Create the marker with DivIcon
+        folium.Marker(
+            [stop['latitude'], stop['longitude']], 
+            popup=popup_text,
+            icon=folium.DivIcon(
+                icon_size=(30, 30),
+                icon_anchor=(15, 15),
+                html=icon_html
+            )
+        ).add_to(m)
     
     # Add route line
     if route_paths and len(route_paths) > 0:
@@ -449,7 +480,7 @@ def create_map(route, route_paths=None, map_provider="OpenStreetMap"):
                 dash_array='5'  # Use dashed line to indicate this is not a road path
             ).add_to(m)
     
-    return m
+    return m 
 
 def _get_color_for_segment(index, total):
     """Generate a color gradient from blue to red based on segment position."""
@@ -460,6 +491,7 @@ def _get_color_for_segment(index, total):
     # Blue (240°) to Red (0°)
     hue = 240 - (240 * index / (total - 1))
     return f'hsl({hue}, 100%, 50%)'
+
 def geocode_stops():
         """Geocode all stops that don't have coordinates."""
         stops_to_geocode = [s for s in st.session_state.stops if 'latitude' not in s or 'longitude' not in s]
@@ -468,7 +500,7 @@ def geocode_stops():
             st.success("All stops already have coordinates.")
             return
         
-        with st.spinner(f"Geocoding {len(stops_to_geocode)} stops..."):
+        with st.spinner(f"Geocoding {len(stops_to_geocode)} stops..."): 
             progress_bar = st.progress(0.0)
             
             geocoder = GeocodingService()
@@ -1200,7 +1232,7 @@ with tab5:
                         with st.spinner("Updating route..."):
                             if st.session_state.path_handler.update_optimal_path(st.session_state.stops):
                                 st.success("Route updated successfully!")
-                                st.experimental_rerun()
+                                st.rerun()
                             else:
                                 st.warning("No update needed or current location not available.")
         else:
@@ -1353,7 +1385,7 @@ with tab1:
                 if st.button("Clear All Stops"):
                     st.session_state.stops = []
                     st.session_state.optimized_route = []
-                    st.experimental_rerun()
+                    st.rerun()
         
             # Optimize route
             if len(st.session_state.stops) >= 2:
@@ -1484,7 +1516,7 @@ with tab1:
                                         distance_unit = "kilometers"
                                         
                                     st.info(f"Total route distance: {total_distance:.2f} {distance_unit}")
-                                    st.experimental_rerun()
+                                    st.rerun()
         else:
             st.info("No stops added yet. Add stops manually or import from a document.")
     
