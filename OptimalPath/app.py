@@ -57,19 +57,86 @@ class OptimalPathHandler:
     
     def __init__(self):
         self.last_update_time = None
-        self.current_route = None
-        self.next_stop_index = 0
+        # self.current_route = None # Not actively used, st.session_state.optimized_route is primary
+        self.next_stop_index = 0 # Default to 0, will be 1 after first auto-recalculation if current_loc is prepended.
+                                 # Or, if manual optimization from current location, it could also be 1.
     
-    def update_optimal_path(self, stops):
-        """Update the optimal path based on current location."""
-        if not st.session_state.current_location or not stops:
+    def update_optimal_path(self, original_stops_full_list, current_user_location):
+        """
+        Update the optimal path based on the user's current location and the original list of stops.
+        The new route will start from the current_user_location.
+        """
+        if not current_user_location or 'latitude' not in current_user_location or 'longitude' not in current_user_location:
+            st.warning("Cannot update optimal path: Current user location or its coordinates are missing.")
             return False
         
-        # Here we would recalculate the optimal route
-        # For now, just update the timestamp
-        self.last_update_time = datetime.now()
-        st.session_state.last_update_time = self.last_update_time
-        return True
+        if not original_stops_full_list:
+            st.warning("Cannot update optimal path: Original stops list is empty.")
+            return False
+
+        current_loc_dict = {
+            'name': 'Current Location',
+            'address': 'My current position',
+            'latitude': current_user_location['latitude'],
+            'longitude': current_user_location['longitude'],
+            'is_current_location': True 
+        }
+
+        # Ensure all original stops have coordinates; this should ideally be guaranteed before this point.
+        # For robustness, filter out any stops from original_stops_full_list that are missing coordinates.
+        valid_original_stops = [s for s in original_stops_full_list if 'latitude' in s and 'longitude' in s]
+        if len(valid_original_stops) < len(original_stops_full_list):
+            st.warning("Some original stops were missing coordinates and were excluded from re-optimization.")
+        
+        if not valid_original_stops: # If, after filtering, no original stops are left
+            st.info("No valid original stops remaining to calculate a new route.")
+            # Optionally, create a route with only the current location
+            st.session_state.optimized_route = [current_loc_dict]
+            st.session_state.route_paths = []
+            self.next_stop_index = 0 # No next stop
+            st.session_state.last_update_time = datetime.now()
+            self.last_update_time = datetime.now()
+            return True # Route "updated" to just current location
+
+        stops_for_recalculation = [current_loc_dict] + valid_original_stops
+        
+        api_key = st.session_state.get('ors_api_key')
+        # Fetch preferences, defaulting if not set
+        use_real_roads_pref = st.session_state.get('use_real_roads_preference', True)
+        cost_type_pref = st.session_state.get('optimization_criteria_preference', "distance")
+
+        actual_use_real_roads = use_real_roads_pref
+        if use_real_roads_pref and not api_key:
+            st.toast("Real road routing preferred but no API key. Using straight-line distances for recalculation.", icon="⚠️")
+            actual_use_real_roads = False
+
+        optimizer = RouteOptimizer(api_key=api_key)
+        
+        # st.spinner is a context manager, use it with "with"
+        with st.spinner("Recalculating optimal route from your current location..."):
+            newly_optimized_route, new_route_paths = optimizer.optimize_route(
+                locations=stops_for_recalculation,
+                start_index=0,  # Current location is now the start (index 0)
+                use_real_roads=actual_use_real_roads,
+                cost_type=cost_type_pref 
+            )
+
+        if newly_optimized_route:
+            st.session_state.optimized_route = newly_optimized_route
+            st.session_state.route_paths = new_route_paths
+            st.session_state.last_update_time = datetime.now()
+            
+            if len(newly_optimized_route) > 1:
+                self.next_stop_index = 1 # Next stop is at index 1 (index 0 is current_loc_dict)
+            else: 
+                self.next_stop_index = 0 # Only current location in route, no "next" stop
+            
+            self.last_update_time = datetime.now()
+            return True
+        else:
+            # Error message should be handled by optimizer or here
+            st.error("Failed to recalculate the optimal path during re-optimization.")
+            return False
     
     def get_distance_to_next_stop(self):
         """Calculate distance and ETA to the next stop."""
@@ -81,8 +148,18 @@ class OptimalPathHandler:
         
         # Get next stop
         next_stop = st.session_state.optimized_route[self.next_stop_index]
-        
-        # Calculate distance using Haversine formula
+
+        # Ensure the current location and the next stop have valid coordinates
+        if 'latitude' not in st.session_state.current_location or \
+           'longitude' not in st.session_state.current_location:
+            st.warning("Current location is missing coordinates.")
+            return None, None
+            
+        if 'latitude' not in next_stop or 'longitude' not in next_stop:
+            # This should ideally not happen if routes are built correctly, but good for robustness.
+            st.warning(f"Next stop '{next_stop.get('name', 'Unnamed')}' is missing coordinates.")
+            return None, None
+
         lat1 = st.session_state.current_location['latitude']
         lon1 = st.session_state.current_location['longitude']
         lat2 = next_stop['latitude']
@@ -244,118 +321,244 @@ def get_location():
     return st.session_state.current_location
 
 def setup_location_tracking():
-    """Set up JavaScript for continuous location tracking with fallbacks."""
-    tracking_js = """
+    """Set up JavaScript for continuous location tracking using watchPosition."""
+    
+    # Determine current tracking state for the hidden input
+    tracking_is_on_python = st.session_state.get('tracking_enabled', False)
+
+    tracking_js = f"""
     <script>
     let watchId = null;
-    
-    // Simple fallback for older browsers
-    function getLocationFallback() {
-        if (navigator.geolocation) {
-            navigator.geolocation.getCurrentPosition(
-                function(position) {
-                    updateLocation(position.coords.latitude, position.coords.longitude, position.coords.accuracy);
-                },
-                function(error) {
-                    document.getElementById('tracking-error').innerHTML = "Error: " + error.message;
-                    document.getElementById('tracking-error').style.display = 'block';
-                }
-            );
-        }
-    }
-    
-    function startTracking() {
-        if (navigator.geolocation) {
-            try {
-                // Start watching position
-                watchId = navigator.geolocation.watchPosition(
-                    function(position) {
-                        // Success callback
-                        updateLocation(position.coords.latitude, position.coords.longitude, position.coords.accuracy);
-                    },
-                    function(error) {
-                        // Error callback
-                        console.error("Error getting location: ", error);
-                        document.getElementById('tracking-error').innerHTML = "Error: " + error.message;
-                        document.getElementById('tracking-error').style.display = 'block';
-                        
-                        // Try fallback on error
-                        setTimeout(getLocationFallback, 2000);
-                    },
-                    {
-                        enableHighAccuracy: true,
-                        timeout: 15000,
-                        maximumAge: 0
-                    }
-                );
-                document.getElementById('tracking-status').innerHTML = "Tracking: Active";
-                document.getElementById('tracking-status').style.color = 'green';
-            } catch (e) {
-                console.error("Exception starting tracking: ", e);
-                document.getElementById('tracking-error').innerHTML = "Error starting tracking: " + e.message;
-                document.getElementById('tracking-error').style.display = 'block';
-            }
-        } else {
-            document.getElementById('tracking-error').innerHTML = "Geolocation is not supported by this browser.";
-            document.getElementById('tracking-error').style.display = 'block';
-        }
-    }
-    
-    function updateLocation(lat, lng, accuracy) {
-        // Send location to Streamlit
-        const data = {
-            lat: lat,
-            lng: lng,
-            accuracy: accuracy,
+    const trackingEnabledInput = document.getElementById('tracking-enabled-input');
+    const statusDiv = document.getElementById('tracking-status-js');
+    const errorDiv = document.getElementById('tracking-error-js');
+    const latSpan = document.getElementById('current-lat-js');
+    const lngSpan = document.getElementById('current-lng-js');
+    const accSpan = document.getElementById('current-acc-js');
+    const timeSpan = document.getElementById('last-update-js');
+
+    function updateUI(message, isError = false) {{
+        if (isError) {{
+            if (errorDiv) errorDiv.innerHTML = message;
+            if (statusDiv) statusDiv.innerHTML = "Tracking: Error";
+            if (statusDiv) statusDiv.style.color = 'red';
+        }} else {{
+            if (statusDiv) statusDiv.innerHTML = message;
+            if (statusDiv) statusDiv.style.color = 'green';
+            if (errorDiv) errorDiv.innerHTML = ""; // Clear previous errors
+        }}
+    }}
+
+    function handlePositionSuccess(position) {{
+        const coords = position.coords;
+        const locationData = {{
+            latitude: coords.latitude,
+            longitude: coords.longitude,
+            accuracy: coords.accuracy,
+            speed: coords.speed, // Get speed if available (m/s)
             timestamp: new Date().toISOString()
-        };
+        }};
         
-        // Use Streamlit's setComponentValue when available
-        if (window.parent && window.parent.postMessage) {
-            const message = {
-                type: "streamlit:setComponentValue",
-                value: data
-            };
-            window.parent.postMessage(message, "*");
-        }
-        
-        // Also update UI elements
-        document.getElementById('current-lat').textContent = lat.toFixed(6);
-        document.getElementById('current-lng').textContent = lng.toFixed(6);
-        document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
-    }
-    
-    function stopTracking() {
-        if (watchId !== null) {
+        // Send data to Streamlit
+        if (window.Streamlit) {{
+            window.Streamlit.setComponentValue(locationData);
+        }} else {{
+            console.warn("Streamlit object not found. Cannot send location to Python.");
+            // Fallback: update local UI elements directly if Streamlit communication fails
+            if (latSpan) latSpan.textContent = coords.latitude.toFixed(6);
+            if (lngSpan) lngSpan.textContent = coords.longitude.toFixed(6);
+            if (accSpan) accSpan.textContent = coords.accuracy.toFixed(1);
+            if (timeSpan) timeSpan.textContent = new Date().toLocaleTimeString();
+        }}
+        updateUI("Tracking: Active (sending data...)");
+    }}
+
+    function handlePositionError(error) {{
+        let errorMessage = "An unknown error occurred.";
+        switch(error.code) {{
+            case error.PERMISSION_DENIED:
+                errorMessage = "Location permission denied. Please enable location access in your browser settings.";
+                break;
+            case error.POSITION_UNAVAILABLE:
+                errorMessage = "Location information is unavailable. Check location services.";
+                break;
+            case error.TIMEOUT:
+                errorMessage = "The request to get location timed out.";
+                break;
+        }}
+        console.error("Geolocation error:", errorMessage, error);
+        updateUI(errorMessage, true);
+        // Stop tracking on persistent errors like permission denied
+        if (error.code === error.PERMISSION_DENIED) {{
+            stopTracking(); // Also update Python state if possible, though this is JS side
+        }}
+    }}
+
+    function startTracking() {{
+        if (navigator.geolocation) {{
+            if (watchId !== null) {{ // Already watching
+                return;
+            }}
+            updateUI("Tracking: Initializing...");
+            watchId = navigator.geolocation.watchPosition(
+                handlePositionSuccess,
+                handlePositionError,
+                {{
+                    enableHighAccuracy: true,
+                    timeout: 20000, // Increased timeout for watchPosition
+                    maximumAge: 0 // Get fresh position data
+                }}
+            );
+            if (watchId !== null) {{
+                 updateUI("Tracking: Active");
+            }} else {{
+                 updateUI("Tracking: Failed to start.", true);
+            }}
+        }} else {{
+            updateUI("Geolocation is not supported by this browser.", true);
+        }}
+    }}
+
+    function stopTracking() {{
+        if (navigator.geolocation && watchId !== null) {{
             navigator.geolocation.clearWatch(watchId);
             watchId = null;
-            document.getElementById('tracking-status').innerHTML = "Tracking: Inactive";
-            document.getElementById('tracking-status').style.color = 'red';
-        }
-    }
+            updateUI("Tracking: Inactive");
+        }} else {{
+            updateUI("Tracking: Was not active or geolocation unavailable.");
+        }}
+         // Clear display when stopped
+        if (latSpan) latSpan.textContent = "-";
+        if (lngSpan) lngSpan.textContent = "-";
+        if (accSpan) accSpan.textContent = "-";
+        if (timeSpan) timeSpan.textContent = "-";
+    }}
+
+    // Initial state based on Python's current view
+    // The Python script will call this component on every rerun.
+    // We need to check the value of the hidden input which reflects Python's state.
+    const trackingEnabled = trackingEnabledInput ? trackingEnabledInput.value === 'true' : false;
     
-    // Start tracking when the page loads if enabled
-    if (document.getElementById('tracking-enabled').value === 'true') {
-        startTracking();
-    }
+    if (trackingEnabled) {{
+        // Check if already tracking to avoid multiple initializations from Streamlit reruns
+        if (watchId === null) {{
+            startTracking();
+        }} else {{
+            // If watchId is not null, it means tracking is already active from a previous JS execution context
+            // (e.g. if only part of the JS was reloaded, which is unlikely with st.html)
+            // or this script block is running again. We should ensure UI consistency.
+            updateUI("Tracking: Active (already running)");
+        }}
+    }} else {{
+        stopTracking();
+    }}
+
+    // Listen for changes to the hidden input (if Streamlit updates it dynamically, which it doesn't)
+    // This is more for future-proofing or complex scenarios.
+    // For now, Streamlit reruns the whole component, so the 'if (trackingEnabled)' above handles it.
+    // However, if the user clicks the checkbox, Streamlit reruns, and this script runs anew.
+    // The `trackingEnabledInput.value` will reflect the new state from Python.
+
+    // Ensure that stopTracking is called if the component is ever removed (though st.html doesn't have a direct unmount)
+    // This is more a conceptual cleanup. Actual stop is handled by Python state change and rerun.
+    window.addEventListener('beforeunload', function() {{
+        // This won't help if the component is removed from DOM by Streamlit,
+        // but good for page closure.
+        if (watchId !== null) {{
+            navigator.geolocation.clearWatch(watchId);
+        }}
+    }});
+
     </script>
     
-    <input type="hidden" id="tracking-enabled" value="${'true' if st.session_state.tracking_enabled else 'false'}" />
+    <!-- Hidden input to reflect Python's tracking state -->
+    <input type="hidden" id="tracking-enabled-input" value="{str(tracking_is_on_python).lower()}" />
     
-    <div id="tracking-container">
-        <div id="tracking-status" style="color: ${('green' if st.session_state.tracking_enabled else 'red')}">
-            Tracking: ${('Active' if st.session_state.tracking_enabled else 'Inactive')}
+    <div id="tracking-container-js">
+        <div id="tracking-status-js" style="color: {('green' if tracking_is_on_python else 'red')}">
+            Tracking: {('Active' if tracking_is_on_python else 'Inactive')}
         </div>
-        <div id="location-display">
-            <div>Current Position: <span id="current-lat">-</span>, <span id="current-lng">-</span></div>
-            <div>Last Update: <span id="last-update">-</span></div>
+        <div id="location-display-js">
+            <div>Current Position (JS): <span id="current-lat-js">-</span>, <span id="current-lng-js">-</span> (<span id="current-acc-js">-</span> m)</div>
+            <div>Last Update (JS): <span id="last-update-js">-</span></div>
         </div>
-        <div id="tracking-error" style="display:none; color: red;"></div>
+        <div id="tracking-error-js" style="display:block; color: red; min-height: 20px;"></div>
     </div>
     """
     
-    # Use Streamlit's html component to inject JavaScript
-    html(tracking_js, height=150)
+    # Use Streamlit's html component to inject JavaScript and potentially get data back
+    # The component_value will be the last value sent by Streamlit.setComponentValue
+    component_value = html(tracking_js, height=180) 
+    
+    if component_value:
+        # New location data received from JavaScript
+        st.session_state.current_location = {
+            'latitude': component_value.get('latitude'),
+            'longitude': component_value.get('longitude'),
+            'accuracy': component_value.get('accuracy'),
+            'speed': component_value.get('speed'), # Get speed from component_value
+            'timestamp': datetime.fromisoformat(component_value.get('timestamp').replace("Z", "+00:00")) 
+        }
+        st.session_state.last_update_time = datetime.now()
+        # No st.rerun() here, as reading the component_value already implies a rerun cycle is in progress or just finished.
+        # The UI will update in the current ongoing rerun.
+
+# Helper function to calculate overall remaining distance and ETA
+def get_overall_remaining_route_info(current_route, current_location, path_handler_instance):
+    """
+    Calculates the total remaining distance and ETA for the rest of the optimized route.
+    """
+    if not current_route or not current_location or \
+       path_handler_instance.next_stop_index >= len(current_route): # Already past or at the last stop
+        return 0.0, 0.0
+
+    total_remaining_distance_km = 0.0
+    total_remaining_eta_minutes = 0.0
+    
+    # Use a temporary optimizer instance for Haversine distance
+    temp_optimizer = RouteOptimizer()
+
+    # 1. Distance and ETA from current live location to the *immediate next stop* in the optimized route
+    #    path_handler.get_distance_to_next_stop() already does this.
+    dist_to_immediate_next_km, eta_to_immediate_next_min = path_handler_instance.get_distance_to_next_stop()
+
+    if dist_to_immediate_next_km is not None and eta_to_immediate_next_min is not None:
+        # Only add if it's a valid segment (not 0,0 which means arrived at final)
+        if not (dist_to_immediate_next_km == 0 and eta_to_immediate_next_min == 0 and \
+                path_handler_instance.next_stop_index >= len(current_route) -1 ): # Avoid adding if truly at final stop
+             total_remaining_distance_km += dist_to_immediate_next_km
+             total_remaining_eta_minutes += eta_to_immediate_next_min
+    
+    # 2. Sum of distances and ETAs for all *subsequent* segments in the optimized route
+    #    Start iterating from the current next_stop_index up to the second to last stop in the route.
+    #    The segment is from current_route[i] to current_route[i+1].
+    #    The first segment (live location to route[next_stop_index]) is already handled.
+    #    So, we sum segments from route[next_stop_index] to route[next_stop_index+1], then route[next_stop_index+1] to route[next_stop_index+2], etc.
+    
+    # Start index for loop should be the current target stop index
+    start_loop_idx = path_handler_instance.next_stop_index 
+    
+    for i in range(start_loop_idx, len(current_route) - 1):
+        stop_from = current_route[i]
+        stop_to = current_route[i+1]
+
+        if 'latitude' in stop_from and 'longitude' in stop_from and \
+           'latitude' in stop_to and 'longitude' in stop_to:
+            
+            segment_dist_m = temp_optimizer._haversine_distance(
+                stop_from['latitude'], stop_from['longitude'],
+                stop_to['latitude'], stop_to['longitude']
+            )
+            segment_dist_km = segment_dist_m / 1000
+            segment_eta_min = (segment_dist_km / 50) * 60 # Assuming 50 km/h
+
+            total_remaining_distance_km += segment_dist_km
+            total_remaining_eta_minutes += segment_eta_min
+        # else: # Stop missing coordinates, skip this segment for overall calculation. Should be rare.
+            # pass
+
+    return total_remaining_distance_km, total_remaining_eta_minutes
+
 
 def create_map(route, route_paths=None, map_provider="OpenStreetMap"):
     """
@@ -365,31 +568,52 @@ def create_map(route, route_paths=None, map_provider="OpenStreetMap"):
         route: List of location dictionaries
         route_paths: List of paths between consecutive stops, each a list of [lat, lng] coordinates
         map_provider: Map tile provider to use
+        center_on_coords: Optional list/tuple [lat, lng] to center the map on.
+        zoom_level: Optional integer for map zoom level.
     """
-    # Handle the case where map_provider is passed as the second argument (backward compatibility)
-    if isinstance(route_paths, str):
-        map_provider = route_paths
+    # Handle backward compatibility for map_provider
+    if isinstance(route_paths, str) and map_provider == "OpenStreetMap": # Check default to avoid conflict
+        map_provider = route_paths # route_paths was map_provider
         route_paths = None
+    elif isinstance(route_paths, (list,tuple)) and isinstance(map_provider, (list,tuple)) and center_on_coords is None:
+        # Heuristic: if route_paths is list and map_provider is list, map_provider is likely center_on_coords
+        # This is getting complex due to positional args. Best to use kwargs in calls.
+        # For now, assume standard new signature if map_provider is not a known tile string.
+        pass
+
+
+    map_center = None
+    initial_zoom = 10 # Default zoom
+
+    if center_on_coords and isinstance(center_on_coords, (list, tuple)) and len(center_on_coords) == 2:
+        map_center = center_on_coords
     
-    # Determine map center (average of all points)
-    lats = [stop['latitude'] for stop in route if 'latitude' in stop]
-    lngs = [stop['longitude'] for stop in route if 'longitude' in stop]
+    if zoom_level is not None:
+        initial_zoom = zoom_level
     
-    if not lats or not lngs:
-        st.error("No valid coordinates to display on the map.")
-        return folium.Map(location=[40.0, -95.0], zoom_start=4)
-    
-    center_lat = sum(lats) / len(lats)
-    center_lng = sum(lngs) / len(lngs)
-    
-    # Create map with selected provider
-    tiles = "OpenStreetMap"
+    if not map_center: # If not centered by specific coords, use average of route
+        lats = [stop['latitude'] for stop in route if 'latitude' in stop and stop['latitude'] is not None]
+        lngs = [stop['longitude'] for stop in route if 'longitude' in stop and stop['longitude'] is not None]
+        
+        if not lats or not lngs:
+            st.error("No valid coordinates in route to display on the map.")
+            return folium.Map(location=[40.0, -95.0], zoom_start=4) # Default map
+        
+        map_center = [sum(lats) / len(lats), sum(lngs) / len(lngs)]
+        # If zoom_level wasn't provided, keep default initial_zoom (e.g., 10 for overview)
+        # Or, if only one stop, set a closer zoom like 13
+        if zoom_level is None and len(lats) == 1:
+            initial_zoom = 13
+
+
+    tiles = "OpenStreetMap" # Default tileset
     if map_provider == "CartoDB":
         tiles = "CartoDB positron"
     elif map_provider == "Stamen":
         tiles = "Stamen Terrain"
+    # else map_provider is "OpenStreetMap" or an unrecognized value, use default OpenStreetMap
     
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=10, tiles=tiles)
+    m = folium.Map(location=map_center, zoom_start=initial_zoom, tiles=tiles)
     
     # Track which stops have valid coordinates to ensure proper numbering
     valid_stops = []
@@ -1157,7 +1381,11 @@ with tab5:
             else:
                 # Stop tracking
                 st.session_state.tracking_service.stop_tracking()
-                st.info("Live tracking disabled.")
+                st.session_state.current_location = None # Clear last known location
+                # Also, consider resetting next_stop_index if the route is no longer actively navigated
+                # path_handler = st.session_state.path_handler
+                # path_handler.next_stop_index = 0 # Or a more sophisticated reset
+                st.info("Live tracking disabled. Last known location cleared.")
     
     with col2:
         if st.button("Get Current Location"):
@@ -1171,77 +1399,188 @@ with tab5:
     
     # Show tracking status if enabled
     if tracking_enabled:
-        st.info(f"Tracking status: {st.session_state.tracking_service.get_tracking_status()}")
+    # Always call setup_location_tracking() once at the beginning of this tab's logic.
+    # This updates st.session_state.current_location if new data has been sent from JS.
+    setup_location_tracking()
+
+    path_handler = st.session_state.path_handler # Get handler instance
+
+    # "Passed Stop Detection" and Automatic Recalculation Logic:
+    # This logic runs if tracking is on, we have a location, an optimized route, and original stops.
+    if st.session_state.tracking_enabled and \
+       st.session_state.current_location and \
+       st.session_state.optimized_route and \
+       len(st.session_state.optimized_route) > 0 and \
+       st.session_state.stops: # Ensure original stops list is available for re-optimization.
+
+        current_loc_for_recalc = st.session_state.current_location
+        current_optimized_route_for_recalc = st.session_state.optimized_route
         
-        # Get current location
-        current_loc = st.session_state.get('current_location')
-        if current_loc:
-            st.metric("Latitude", f"{current_loc['latitude']:.6f}")
-            st.metric("Longitude", f"{current_loc['longitude']:.6f}")
-            
-            if 'accuracy' in current_loc:
-                st.metric("Accuracy", f"{current_loc['accuracy']:.1f} meters")
-            
-            if 'timestamp' in current_loc:
-                st.text(f"Last updated: {current_loc['timestamp'].strftime('%H:%M:%S')}")
-            
-            # Show distance to next stop if available
-            if st.session_state.optimized_route:
-                path_handler = st.session_state.path_handler
-                distance, eta = path_handler.get_distance_to_next_stop()
-                if distance is not None:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric("Distance to next stop", f"{distance:.2f} km")
-                    with col2:
-                        st.metric("ETA", f"{eta:.1f} minutes")
-                
-                # Show current route
-                st.subheader("Current Route")
-                if st.session_state.optimized_route:
-                    # Create a simple table of stops
-                    preview_data = []
-                    for i, stop in enumerate(st.session_state.optimized_route):
-                        preview_data.append({
-                            "Stop #": i+1,
-                            "Name": stop.get('name', 'Unnamed'),
-                            "Address": stop.get('address', 'No address')
-                        })
-                    
-                    st.table(pd.DataFrame(preview_data))
-                    
-                    # Add a mini-map with current location
-                    st.subheader("Live Tracking Map")
-                    
-                    # Add current location to the map
-                    if current_loc:
-                        current_pos = {
-                            'name': 'Current Position',
-                            'address': 'My Location',
-                            'latitude': current_loc['latitude'],
-                            'longitude': current_loc['longitude']
-                        }
+        # target_idx_in_optimized_route is the index in current_optimized_route_for_recalc
+        # that the user is currently navigating towards.
+        target_idx_in_optimized_route = path_handler.next_stop_index
+
+        # Proceed only if target_idx_in_optimized_route is a valid index.
+        if 0 <= target_idx_in_optimized_route < len(current_optimized_route_for_recalc):
+            target_stop_for_arrival_check = current_optimized_route_for_recalc[target_idx_in_optimized_route]
+
+            # Crucially, ensure the target_stop_for_arrival_check is not the 'Current Location' placeholder itself.
+            # We "arrive" at actual destinations, not at our own starting point marker.
+            if not target_stop_for_arrival_check.get('is_current_location', False):
+                if 'latitude' in target_stop_for_arrival_check and 'longitude' in target_stop_for_arrival_check:
+                    # Initialize a temporary optimizer for Haversine distance calculation.
+                    # Consider making _haversine_distance static or a top-level function if used frequently outside class.
+                    temp_optimizer_for_dist_check = RouteOptimizer() 
+                    distance_to_target_stop_m = temp_optimizer_for_dist_check._haversine_distance(
+                        current_loc_for_recalc['latitude'], current_loc_for_recalc['longitude'],
+                        target_stop_for_arrival_check['latitude'], target_stop_for_arrival_check['longitude']
+                    )
+
+                    ARRIVAL_THRESHOLD_METERS = 50 # Define the proximity threshold for arrival.
+                    if distance_to_target_stop_m < ARRIVAL_THRESHOLD_METERS:
+                        st.toast(f"Arrived at: {target_stop_for_arrival_check.get('name', 'stop')}. Recalculating route...", icon="🏁")
                         
-                        # Create map with current location and route
-                        route_with_current = [current_pos] + st.session_state.optimized_route
-                        mini_map = create_map(route_with_current, st.session_state.route_paths, st.session_state.map_provider)
-                        folium_static(mini_map, width=800, height=500)
+                        # Call update_optimal_path with the original full list of stops and current location.
+                        # This re-plans the entire remaining tour from the current position.
+                        if path_handler.update_optimal_path(st.session_state.stops, current_loc_for_recalc):
+                            st.success("Route automatically updated based on your current location.")
+                            st.rerun() # Rerun to reflect the updated route immediately.
+                        else:
+                            st.error("Failed to automatically update route after arrival.")
+                # else: # Optional: warning if target stop is missing coordinates (should be caught earlier)
+                    # st.warning(f"Target stop {target_stop_for_arrival_check.get('name')} is missing coordinates for arrival check.")
+        # else: No valid next stop index to check for arrival (e.g., end of route).
+            pass # No action needed if index is out of bounds or no specific target.
+
+    # UI Display Logic for Live Tracking Tab
+    if st.session_state.tracking_enabled:
+        st.info(f"Tracking status (Python Service): {st.session_state.tracking_service.get_tracking_status()}")
+        current_loc_display = st.session_state.get('current_location') # Use a distinct variable for clarity in display logic
+
+        if current_loc_display:
+            st.metric("Current Latitude (Python)", f"{current_loc_display['latitude']:.6f}")
+            st.metric("Current Longitude (Python)", f"{current_loc_display['longitude']:.6f}")
+            
+            if current_loc_display.get('accuracy') is not None:
+                st.metric("Location Accuracy", f"{current_loc_display['accuracy']:.1f} meters")
+            
+            if current_loc_display.get('speed') is not None:
+                speed_kmh = current_loc_display['speed'] * 3.6 # Convert m/s to km/h
+                st.metric("Current Speed", f"{speed_kmh:.1f} km/h")
+            else:
+                st.metric("Current Speed", "N/A")
+
+            if current_loc_display.get('timestamp'):
+                # Ensure timestamp is a datetime object for formatting
+                current_loc_timestamp = current_loc_display['timestamp']
+                if isinstance(current_loc_timestamp, str): 
+                    current_loc_timestamp = datetime.fromisoformat(current_loc_timestamp.replace("Z", "+00:00"))
+                st.text(f"Last Location Update (Python): {current_loc_timestamp.strftime('%H:%M:%S')}")
+
+            # Display route-related information if an optimized route exists
+            if st.session_state.optimized_route:
+                distance_to_next, eta_to_next = path_handler.get_distance_to_next_stop()
+                
+                # Handle display of distance/ETA based on current route state
+                is_at_final_stop = path_handler.next_stop_index >= len(st.session_state.optimized_route)
+                is_route_only_current_loc = (len(st.session_state.optimized_route) == 1 and 
+                                             st.session_state.optimized_route[0].get('is_current_location'))
+                
+                next_stop_info_str = "N/A"
+                if not is_at_final_stop and not is_route_only_current_loc and \
+                   path_handler.next_stop_index < len(st.session_state.optimized_route) and \
+                   st.session_state.optimized_route[path_handler.next_stop_index]:
+                    next_stop_obj = st.session_state.optimized_route[path_handler.next_stop_index]
+                    next_stop_info_str = f"{next_stop_obj.get('name', 'Unnamed')} ({next_stop_obj.get('address', 'N/A')})"
+                
+                st.subheader("Next Destination")
+                st.markdown(f"**{next_stop_info_str}**")
+
+                if is_at_final_stop or is_route_only_current_loc:
+                     st.success("You have arrived at your final destination or the route is complete!")
+                elif distance_to_next is not None: # Check if distance_to_next is valid
+                    # Display details for the immediate next stop
+                    col_dist_display, col_eta_display = st.columns(2)
+                    with col_dist_display:
+                        st.metric("Distance to Next Stop", f"{distance_to_next:.2f} km")
+                    with col_eta_display:
+                        st.metric("ETA to Next Stop", f"{eta_to_next:.1f} minutes") # Renamed for clarity
+                
+                # Overall route progress
+                if st.session_state.optimized_route and st.session_state.current_location:
+                    overall_rem_dist_km, overall_rem_eta_min = get_overall_remaining_route_info(
+                        st.session_state.optimized_route,
+                        st.session_state.current_location,
+                        path_handler # path_handler is already defined
+                    )
+                    st.subheader("Overall Trip Progress")
+                    col_overall_dist, col_overall_eta = st.columns(2)
+                    with col_overall_dist:
+                        st.metric("Total Remaining Distance", f"{overall_rem_dist_km:.2f} km")
+                    with col_overall_eta:
+                        st.metric("Total Remaining ETA", f"{overall_rem_eta_min:.1f} min")
+
+                st.subheader("Full Optimized Route")
+                route_display_data = []
+                for i, stop_detail in enumerate(st.session_state.optimized_route):
+                    stop_number_display = str(i + 1) 
+                    if stop_detail.get('is_current_location'):
+                        stop_number_display = "Current" 
+                    elif i > 0 and st.session_state.optimized_route[0].get('is_current_location'):
+                        stop_number_display = str(i) 
                     
-                    # Update route button
-                    if st.button("Update Route Based on Current Location"):
-                        with st.spinner("Updating route..."):
-                            if st.session_state.path_handler.update_optimal_path(st.session_state.stops):
-                                st.success("Route updated successfully!")
+                    route_display_data.append({
+                        "Stop #": stop_number_display,
+                        "Name": stop_detail.get('name', 'Unnamed Stop'),
+                        "Address": stop_detail.get('address', 'N/A')
+                    })
+                st.table(pd.DataFrame(route_display_data))
+                
+                st.subheader("Live Tracking Route Map")
+                
+                map_center_coords = None
+                map_zoom_level = 12 # Default zoom for live tracking map
+                
+                if current_loc_display and 'latitude' in current_loc_display and 'longitude' in current_loc_display:
+                    map_center_coords = [current_loc_display['latitude'], current_loc_display['longitude']]
+                    
+                    # Dynamic zoom based on distance to next stop
+                    if distance_to_next is not None and distance_to_next > 0: # distance_to_next is in km
+                        if distance_to_next <= 0.5: map_zoom_level = 15
+                        elif distance_to_next <= 1: map_zoom_level = 14
+                        elif distance_to_next <= 5: map_zoom_level = 12
+                        elif distance_to_next <= 10: map_zoom_level = 11
+                        elif distance_to_next <= 20: map_zoom_level = 10
+                        else: map_zoom_level = 9
+                    else: # No next stop or at destination
+                        map_zoom_level = 14 # Zoom in on current location
+                
+                live_route_map = create_map(
+                    route=st.session_state.optimized_route, 
+                    route_paths=st.session_state.route_paths, 
+                    map_provider=st.session_state.map_provider,
+                    center_on_coords=map_center_coords,
+                    zoom_level=map_zoom_level
+                )
+                folium_static(live_route_map, width=800, height=500)
+                
+                # Button for manual override of route recalculation
+                if st.button("Force Update Route From Current Location"):
+                    if current_loc_display: # Ensure current_loc_display is available
+                        with st.spinner("Manually updating route from current location..."):
+                            if path_handler.update_optimal_path(st.session_state.stops, current_loc_display):
+                                st.success("Route manually updated successfully!")
                                 st.rerun()
                             else:
-                                st.warning("No update needed or current location not available.")
-        else:
-            st.warning("Waiting for location data... Please make sure you've allowed location access in your browser.")
-            
-            # Set up the location tracking JavaScript
-            setup_location_tracking()
-    else:
-        st.info("Enable live tracking to see your current location and optimize routes in real-time.")
+                                st.warning("Could not manually update route. Ensure original stops are defined.")
+                    else:
+                        st.warning("Current location data not available for manual update.")
+            else: # No st.session_state.optimized_route
+                st.info("No optimized route is currently active. Please create and optimize a route in the 'Stop Manager' tab.")
+        else: # No st.session_state.current_location
+            st.warning("Tracking is enabled, but waiting for the first location data. Please ensure your browser has location access permission.")
+    else: # Not st.session_state.tracking_enabled
+        st.info("Live tracking is currently disabled. Enable it to see your location and use live route features.")
 
     # Settings tab
 with tab4:
@@ -1416,11 +1755,15 @@ with tab1:
                         use_real_roads = st.checkbox("Follow real road network", value=True, 
                                                    help="When enabled, routes will follow actual roads instead of straight lines.")
                         
-                        optimization_criteria = st.radio(
+                        optimization_criteria_selection = st.radio(
                             "Optimize for",
                             ["Distance", "Time"],
-                            horizontal=True
+                            horizontal=True,
+                            key="optimization_criteria_radio" 
                         )
+                        # Store preferences in session state when "Optimize Route" is clicked
+                        st.session_state.optimization_criteria_preference = "distance" if optimization_criteria_selection == "Distance" else "time"
+                        st.session_state.use_real_roads_preference = use_real_roads
                         
                         if use_real_roads and not st.session_state.ors_api_key:
                             st.warning("Real road routing requires an OpenRouteService API key. Please add one in Settings.")
@@ -1449,6 +1792,7 @@ with tab1:
                                     use_real_roads = False
                                 
                                 optimizer = RouteOptimizer(api_key=api_key)
+                                # Preferences are now saved just above
                                 
                                 # Handle current location if tracking is enabled
                                 if use_current_location and st.session_state.current_location:
@@ -1485,6 +1829,16 @@ with tab1:
                                 
                                 if optimized_route:
                                     st.success("Route optimized successfully!")
+
+                                    # Update path_handler's next_stop_index based on this new optimized route
+                                    path_handler_instance = st.session_state.path_handler
+                                    if use_current_location: # This variable indicates if 'Current Location' was selected as start
+                                        if len(optimized_route) > 1: # Current loc + at least one destination
+                                            path_handler_instance.next_stop_index = 1
+                                        else: # Only current location in the route
+                                            path_handler_instance.next_stop_index = 0
+                                    else: # Route optimized but not starting with 'Current Location'
+                                        path_handler_instance.next_stop_index = 0 # Start from the first stop in the list
                                     
                                     # Calculate total distance for the optimized route
                                     if use_real_roads and route_paths:
