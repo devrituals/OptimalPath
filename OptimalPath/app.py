@@ -1685,22 +1685,23 @@ with tab1:
                 st.warning(f"{len(missing_coords)} stops are missing coordinates. Please geocode them first.")
             else:
                 col1, col2 = st.columns(2)
+
+                start_options = ["First stop in list"]
+
+                # Add current location option if available
+                if st.session_state.current_location:
+                    start_options.insert(0, "Current Location")
+                
+                # Add all stops
+                start_options.extend([stop['name'] for stop in st.session_state.stops])
+                
+                start_option = st.selectbox(
+                    "Choose starting point",
+                    start_options
+                )
+                use_current_location = start_option == "Current Location"
                 
                 with col1:
-                    start_options = ["First stop in list"]
-
-                    # Add current location option if available
-                    if st.session_state.current_location:
-                        start_options.insert(0, "Current Location")
-                    
-                        # Add all stops
-                        start_options.extend([stop['name'] for stop in st.session_state.stops])
-                    
-                        start_option = st.selectbox(
-                            "Choose starting point",
-                            start_options
-                        )
-                        use_current_location = start_option == "Current Location"
                     
                     use_real_roads = st.checkbox("Follow real road network", value=True, 
                                                help="When enabled, routes will follow actual roads instead of straight lines.")
