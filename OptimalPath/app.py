@@ -207,31 +207,47 @@ if 'path_handler' not in st.session_state:
 # HELPER FUNCTIONS
 # =====================================================
 def get_location():
-    """Simple location getter with better error handling."""
-    loc_js = """
+    """Get location and store in session state."""
+    loc_js = f"""
     <script>
-    function getLocation() {
-        if (navigator.geolocation) {
+    function getLocation() {{
+        if (navigator.geolocation) {{
             navigator.geolocation.getCurrentPosition(
-                function(position) {
-                    // Display coordinates directly in the page
-                    document.getElementById('coords').innerHTML = 
-                        'Lat: ' + position.coords.latitude + ', Lng: ' + position.coords.longitude;
-                },
-                function(error) {
+                function(position) {{
+                    // Send to Streamlit via query params
+                    const lat = position.coords.latitude;
+                    const lng = position.coords.longitude;
+                    window.parent.postMessage({{
+                        type: 'location',
+                        latitude: lat,
+                        longitude: lng
+                    }}, '*');
+                    document.getElementById('coords').innerHTML = 'Location detected: ' + lat.toFixed(6) + ', ' + lng.toFixed(6);
+                }},
+                function(error) {{
                     document.getElementById('coords').innerHTML = 'Error: ' + error.message;
-                }
+                }}
             );
-        } else {
-            document.getElementById('coords').innerHTML = 'Geolocation not supported';
-        }
-    }
+        }}
+    }}
     getLocation();
     </script>
     <div id="coords">Getting location...</div>
     """
     
-    return html(loc_js, height=100)
+    component_value = html(loc_js, height=100)
+    
+    # Check if we received location data
+    if component_value and 'latitude' in component_value:
+        st.session_state.current_location = {
+            'latitude': component_value['latitude'],
+            'longitude': component_value['longitude'],
+            'timestamp': datetime.now()
+        }
+        st.success("Location acquired!")
+        st.rerun()
+    
+    return st.session_state.current_location
 
 def setup_location_tracking():
     """Set up JavaScript for continuous location tracking using watchPosition."""
@@ -1670,10 +1686,10 @@ with tab1:
                 
                 with col1:
                     start_options = ["First stop in list"]
-                    
-                    # Add current location option if tracking is enabled
-                    if st.session_state.tracking_enabled and st.session_state.current_location:
-                        start_options.insert(0, "Current Location")
+
+                    # Add current location option if available
+                    if st.session_state.current_location:
+                    start_options.insert(0, "Current Location")
                     
                     # Add all stops
                     start_options.extend([stop['name'] for stop in st.session_state.stops])
