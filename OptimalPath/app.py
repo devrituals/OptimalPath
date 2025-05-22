@@ -1819,8 +1819,6 @@ with tab1:
                                     
                                 st.info(f"Total route distance: {total_distance:.2f} {distance_unit}")
                                 st.rerun()
-                                else:
-                                    st.info("No stops added yet. Add stops manually or import from a document.")
                             
                             # Map View tab
                             # Inside tab2 (Map View tab)
