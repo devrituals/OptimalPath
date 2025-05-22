@@ -1699,7 +1699,7 @@ with tab1:
                         start_option = st.selectbox(
                             "Choose starting point",
                             start_options
-                    )
+                        )
                         use_current_location = start_option == "Current Location"
                     
                     use_real_roads = st.checkbox("Follow real road network", value=True, 
@@ -1721,8 +1721,6 @@ with tab1:
                 with col2:
                     if st.button("Optimize Route"):
                         with st.spinner("Optimizing route..."):
-                            # Handle current location as starting point
-                            use_current_location = start_option == "Current Location"
                             
                             # Determine starting index for regular stops
                             if start_option == "First stop in list":
