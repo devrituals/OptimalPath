@@ -2017,6 +2017,7 @@ with tab2:
                                 for step in directions:
                                     st.write(f"   - {step['instruction']}")
                             else:
+                                distance = optimizer._haversine_distance(stop['latitude'], stop['longitude'], route[i+1]['latitude'], route[i+1]['longitude']) / (1609.34 if st.session_state.distance_units == 'Miles' else 1000)
                                 st.write(f"   - Drive approximately {distance:.2f} {distance_unit}")
         else:
             st.warning("Some stops are missing coordinates. Please geocode them first.")
