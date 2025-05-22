@@ -1689,14 +1689,14 @@ with tab1:
 
                     # Add current location option if available
                     if st.session_state.current_location:
-                    start_options.insert(0, "Current Location")
+                        start_options.insert(0, "Current Location")
                     
-                    # Add all stops
-                    start_options.extend([stop['name'] for stop in st.session_state.stops])
+                        # Add all stops
+                        start_options.extend([stop['name'] for stop in st.session_state.stops])
                     
-                    start_option = st.selectbox(
-                        "Choose starting point",
-                        start_options
+                        start_option = st.selectbox(
+                            "Choose starting point",
+                            start_options
                     )
                     
                     use_real_roads = st.checkbox("Follow real road network", value=True, 
