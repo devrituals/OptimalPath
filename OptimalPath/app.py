@@ -707,6 +707,22 @@ def create_map(route, route_paths=None, map_provider="OpenStreetMap", center_on_
     
     return m 
 
+def get_turn_by_turn_directions(start_coords, end_coords, api_key=None):
+    """Get turn-by-turn directions between two points."""
+    if api_key:
+        # OpenRouteService directions
+        url = "https://api.openrouteservice.org/v2/directions/driving-car"
+        headers = {'Authorization': api_key}
+        body = {
+            "coordinates": [[start_coords[1], start_coords[0]], [end_coords[1], end_coords[0]]],
+            "instructions": True
+        }
+        response = requests.post(url, json=body, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            return data['features'][0]['properties']['segments'][0]['steps']
+    return None
+
 def _get_color_for_segment(index, total):
     """Generate a color gradient from blue to red based on segment position."""
     if total <= 1:
@@ -1986,11 +2002,19 @@ with tab2:
                 if route_paths:
                     with st.expander("Driving Directions"):
                         st.write("### Turn-by-Turn Directions")
-                        st.info("Actual turn-by-turn directions would require additional API calls to a directions service.")
                         
                         for i, stop in enumerate(route[:-1]):
                             st.write(f"**{i+1}. From {stop['name']} to {route[i+1]['name']}**")
-                            st.write(f"   - Drive approximately {optimizer._haversine_distance(stop['latitude'], stop['longitude'], route[i+1]['latitude'], route[i+1]['longitude']) / (1609.34 if st.session_state.distance_units == 'Miles' else 1000):.2f} {distance_unit}")
+                            directions = get_turn_by_turn_directions(
+                            [stop['latitude'], stop['longitude']],
+                            [route[i+1]['latitude'], route[i+1]['longitude']],
+                            st.session_state.ors_api_key
+                        )
+                            if directions:
+                                for step in directions:
+                                    st.write(f"   - {step['instruction']}")
+                            else:
+                                st.write(f"   - Drive approximately {distance:.2f} {distance_unit}")
         else:
             st.warning("Some stops are missing coordinates. Please geocode them first.")
     else:
