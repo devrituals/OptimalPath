@@ -1700,6 +1700,7 @@ with tab1:
                             "Choose starting point",
                             start_options
                     )
+                        use_current_location = start_option == "Current Location"
                     
                     use_real_roads = st.checkbox("Follow real road network", value=True, 
                                                help="When enabled, routes will follow actual roads instead of straight lines.")
