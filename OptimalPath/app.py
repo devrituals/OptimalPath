@@ -1402,7 +1402,6 @@ with tab5:
     if tracking_enabled:
         # Always call setup_location_tracking() once at the beginning of this tab's logic.
         # This updates st.session_state.current_location if new data has been sent from JS.
-        setup_location_tracking()
 
         path_handler = st.session_state.path_handler # Get handler instance
 
