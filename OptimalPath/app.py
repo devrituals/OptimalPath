@@ -1819,378 +1819,378 @@ with tab1:
                                     
                                 st.info(f"Total route distance: {total_distance:.2f} {distance_unit}")
                                 st.rerun()
-    else:
-        st.info("No stops added yet. Add stops manually or import from a document.")
-
-# Map View tab
-# Inside tab2 (Map View tab)
-with tab2:
-    st.header("Map View")
-    
-    # Map settings
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        if st.button("Center Map"):
-            st.success("Map centered")
-    
-    with col2:
-        if 'route_paths' in st.session_state and st.session_state.route_paths:
-            road_view = st.checkbox("Show Road Paths", value=True, 
-                                  help="Toggle between road paths and direct lines")
-        else:
-            road_view = False
-    
-    with col3:
-        if st.button("Export Map as HTML"):
-            if not st.session_state.stops:
-                st.error("No stops available to export.")
-            else:
-                # Create map
-                route = st.session_state.optimized_route if st.session_state.optimized_route else st.session_state.stops
-                route_paths = st.session_state.route_paths if 'route_paths' in st.session_state and road_view else None
-                
-                if all('latitude' in stop and 'longitude' in stop for stop in route):
-                    # Create map file
-                    m = create_map(route, route_paths, st.session_state.map_provider)
-                    
-                    # Save map to temporary file
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.html') as tmp:
-                        m.save(tmp.name)
-                    
-                    # Offer download
-                    with open(tmp.name, 'rb') as f:
-                        map_data = f.read()
-                        st.download_button(
-                            label="Download Map HTML",
-                            data=map_data,
-                            file_name="route_map.html",
-                            mime="text/html"
-                        )
-                    
-                    # Clean up
-                    os.unlink(tmp.name)
-                else:
-                    st.error("Some stops are missing coordinates. Please geocode them first.")
-    
-    # Display map
-    if st.session_state.stops:
-        route = st.session_state.optimized_route if st.session_state.optimized_route else st.session_state.stops
-        
-        # Decide whether to show road paths or not
-        route_paths = None
-        if 'route_paths' in st.session_state and road_view:
-            route_paths = st.session_state.route_paths
-        
-        # Check if we have coordinates for all stops
-        if all('latitude' in stop and 'longitude' in stop for stop in route):
-            st.subheader("Route Map")
-            m = create_map(route, route_paths, st.session_state.map_provider)
-            folium_static(m, width=1000, height=600)
-            
-            # Display basic route statistics
-            if len(route) > 1:
-                st.subheader("Route Statistics")
-                
-                optimizer = RouteOptimizer()
-                total_distance = 0
-                
-                if route_paths:
-                    # Calculate distance along the actual road paths
-                    for path in route_paths:
-                        for i in range(len(path) - 1):
-                            segment_distance = optimizer._haversine_distance(
-                                path[i][0], path[i][1],  # lat1, lon1
-                                path[i+1][0], path[i+1][1]  # lat2, lon2
-                            )
-                            total_distance += segment_distance
-                else:
-                    # Calculate direct distances
-                    for i in range(len(route) - 1):
-                        total_distance += optimizer._haversine_distance(
-                            route[i]['latitude'], route[i]['longitude'],
-                            route[i+1]['latitude'], route[i+1]['longitude']
-                        )
-                
-                # Convert to appropriate units
-                if st.session_state.distance_units == "Miles":
-                    total_distance = total_distance / 1609.34  # meters to miles
-                    distance_unit = "miles"
-                else:
-                    total_distance = total_distance / 1000  # meters to km
-                    distance_unit = "km"
-                    
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total Stops", len(route))
-                with col2:
-                    st.metric(f"Total Distance ({distance_unit})", f"{total_distance:.2f}")
-                with col3:
-                    if route_paths:
-                        st.metric("Routing Type", "Real Roads")
-                    else:
-                        st.metric("Routing Type", "Direct Lines")
-                
-                # Show driving directions if we have road paths
-                if route_paths:
-                    with st.expander("Driving Directions"):
-                        st.write("### Turn-by-Turn Directions")
-                        
-                        for i, stop in enumerate(route[:-1]):
-                            st.write(f"**{i+1}. From {stop['name']} to {route[i+1]['name']}**")
-                            directions = get_turn_by_turn_directions(
-                            [stop['latitude'], stop['longitude']],
-                            [route[i+1]['latitude'], route[i+1]['longitude']],
-                            st.session_state.ors_api_key
-                        )
-                            if directions:
-                                for step in directions:
-                                    st.write(f"   - {step['instruction']}")
-                            else:
-                                distance = optimizer._haversine_distance(stop['latitude'], stop['longitude'], route[i+1]['latitude'], route[i+1]['longitude']) / (1609.34 if st.session_state.distance_units == 'Miles' else 1000)
-                                st.write(f"   - Drive approximately {distance:.2f} {distance_unit}")
-        else:
-            st.warning("Some stops are missing coordinates. Please geocode them first.")
-    else:
-        st.info("No stops added yet. Add stops manually or import from a document.")
-
-# Reports tab
-with tab3:
-    st.header("Route Reports")
-    
-    # Only show report options if we have stops
-    if not st.session_state.stops:
-        st.info("Add stops first to generate reports.")
-    else:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            report_type = st.selectbox(
-                "Report Type",
-                ["Standard Route Report", "Detailed Distance Matrix", "Summary Statistics"]
-            )
-        
-        with col2:
-            report_format = st.selectbox(
-                "Export Format",
-                ["Markdown", "CSV", "PDF"]
-            )
-        
-        if st.button("Generate Report"):
-            with st.spinner("Generating report..."):
-                route = st.session_state.optimized_route if st.session_state.optimized_route else st.session_state.stops
-                
-                # Check if we have coordinates for distance calculations
-                if report_type in ["Standard Route Report", "Detailed Distance Matrix"] and not all('latitude' in stop and 'longitude' in stop for stop in route):
-                    st.warning("Some stops are missing coordinates. Distance calculations will be omitted.")
-                
-                # Generate the appropriate report
-                if report_type == "Standard Route Report":
-                    report_content = generate_report()
-                    
-                    # Display the report directly in the UI
-                    st.subheader("Route Report")
-                    st.markdown(report_content)
-                    
-                    # Prepare for download
-                    if report_format == "Markdown":
-                        download_data = report_content.encode()
-                        download_filename = f"route_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-                        download_mimetype = "text/markdown"
-                    elif report_format == "CSV":
-                        # Convert to CSV format
-                        csv_rows = []
-                        csv_rows.append(["Stop #", "Name", "Address", "Latitude", "Longitude", "Distance to Next"])
-                        
-                        optimizer = RouteOptimizer()
-                        for i, stop in enumerate(route):
-                            row = [
-                                i+1,
-                                stop.get('name', 'Unnamed'),
-                                stop.get('address', 'No address'),
-                                stop.get('latitude', ''),
-                                stop.get('longitude', '')
-                            ]
-                            
-                            # Add distance to next stop
-                            if i < len(route) - 1 and 'latitude' in stop and 'longitude' in stop and 'latitude' in route[i+1] and 'longitude' in route[i+1]:
-                                distance = optimizer._haversine_distance(
-                                    stop['latitude'], stop['longitude'],
-                                    route[i+1]['latitude'], route[i+1]['longitude']
-                                )
-                                
-                                # Convert to appropriate units
-                                if st.session_state.distance_units == "Miles":
-                                    distance = distance / 1609.34  # meters to miles
                                 else:
-                                    distance = distance / 1000  # meters to km
+                                    st.info("No stops added yet. Add stops manually or import from a document.")
+                            
+                            # Map View tab
+                            # Inside tab2 (Map View tab)
+                            with tab2:
+                                st.header("Map View")
                                 
-                                row.append(f"{distance:.2f}")
-                            else:
-                                row.append('')
+                                # Map settings
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    if st.button("Center Map"):
+                                        st.success("Map centered")
+                                
+                                with col2:
+                                    if 'route_paths' in st.session_state and st.session_state.route_paths:
+                                        road_view = st.checkbox("Show Road Paths", value=True, 
+                                                              help="Toggle between road paths and direct lines")
+                                    else:
+                                        road_view = False
+                                
+                                with col3:
+                                    if st.button("Export Map as HTML"):
+                                        if not st.session_state.stops:
+                                            st.error("No stops available to export.")
+                                        else:
+                                            # Create map
+                                            route = st.session_state.optimized_route if st.session_state.optimized_route else st.session_state.stops
+                                            route_paths = st.session_state.route_paths if 'route_paths' in st.session_state and road_view else None
+                                            
+                                            if all('latitude' in stop and 'longitude' in stop for stop in route):
+                                                # Create map file
+                                                m = create_map(route, route_paths, st.session_state.map_provider)
+                                                
+                                                # Save map to temporary file
+                                                with tempfile.NamedTemporaryFile(delete=False, suffix='.html') as tmp:
+                                                    m.save(tmp.name)
+                                                
+                                                # Offer download
+                                                with open(tmp.name, 'rb') as f:
+                                                    map_data = f.read()
+                                                    st.download_button(
+                                                        label="Download Map HTML",
+                                                        data=map_data,
+                                                        file_name="route_map.html",
+                                                        mime="text/html"
+                                                    )
+                                                
+                                                # Clean up
+                                                os.unlink(tmp.name)
+                                            else:
+                                                st.error("Some stops are missing coordinates. Please geocode them first.")
+                                
+                                # Display map
+                                if st.session_state.stops:
+                                    route = st.session_state.optimized_route if st.session_state.optimized_route else st.session_state.stops
+                                    
+                                    # Decide whether to show road paths or not
+                                    route_paths = None
+                                    if 'route_paths' in st.session_state and road_view:
+                                        route_paths = st.session_state.route_paths
+                                    
+                                    # Check if we have coordinates for all stops
+                                    if all('latitude' in stop and 'longitude' in stop for stop in route):
+                                        st.subheader("Route Map")
+                                        m = create_map(route, route_paths, st.session_state.map_provider)
+                                        folium_static(m, width=1000, height=600)
+                                        
+                                        # Display basic route statistics
+                                        if len(route) > 1:
+                                            st.subheader("Route Statistics")
+                                            
+                                            optimizer = RouteOptimizer()
+                                            total_distance = 0
+                                            
+                                            if route_paths:
+                                                # Calculate distance along the actual road paths
+                                                for path in route_paths:
+                                                    for i in range(len(path) - 1):
+                                                        segment_distance = optimizer._haversine_distance(
+                                                            path[i][0], path[i][1],  # lat1, lon1
+                                                            path[i+1][0], path[i+1][1]  # lat2, lon2
+                                                        )
+                                                        total_distance += segment_distance
+                                            else:
+                                                # Calculate direct distances
+                                                for i in range(len(route) - 1):
+                                                    total_distance += optimizer._haversine_distance(
+                                                        route[i]['latitude'], route[i]['longitude'],
+                                                        route[i+1]['latitude'], route[i+1]['longitude']
+                                                    )
+                                            
+                                            # Convert to appropriate units
+                                            if st.session_state.distance_units == "Miles":
+                                                total_distance = total_distance / 1609.34  # meters to miles
+                                                distance_unit = "miles"
+                                            else:
+                                                total_distance = total_distance / 1000  # meters to km
+                                                distance_unit = "km"
+                                                
+                                            col1, col2, col3 = st.columns(3)
+                                            with col1:
+                                                st.metric("Total Stops", len(route))
+                                            with col2:
+                                                st.metric(f"Total Distance ({distance_unit})", f"{total_distance:.2f}")
+                                            with col3:
+                                                if route_paths:
+                                                    st.metric("Routing Type", "Real Roads")
+                                                else:
+                                                    st.metric("Routing Type", "Direct Lines")
+                                            
+                                            # Show driving directions if we have road paths
+                                            if route_paths:
+                                                with st.expander("Driving Directions"):
+                                                    st.write("### Turn-by-Turn Directions")
+                                                    
+                                                    for i, stop in enumerate(route[:-1]):
+                                                        st.write(f"**{i+1}. From {stop['name']} to {route[i+1]['name']}**")
+                                                        directions = get_turn_by_turn_directions(
+                                                        [stop['latitude'], stop['longitude']],
+                                                        [route[i+1]['latitude'], route[i+1]['longitude']],
+                                                        st.session_state.ors_api_key
+                                                    )
+                                                        if directions:
+                                                            for step in directions:
+                                                                st.write(f"   - {step['instruction']}")
+                                                        else:
+                                                            distance = optimizer._haversine_distance(stop['latitude'], stop['longitude'], route[i+1]['latitude'], route[i+1]['longitude']) / (1609.34 if st.session_state.distance_units == 'Miles' else 1000)
+                                                            st.write(f"   - Drive approximately {distance:.2f} {distance_unit}")
+                                    else:
+                                        st.warning("Some stops are missing coordinates. Please geocode them first.")
+                                else:
+                                    st.info("No stops added yet. Add stops manually or import from a document.")
                             
-                            csv_rows.append(row)
-                        
-                        # Convert to CSV string
-                        csv_buffer = io.StringIO()
-                        csv_writer = csv.writer(csv_buffer)
-                        csv_writer.writerows(csv_rows)
-                        download_data = csv_buffer.getvalue().encode()
-                        download_filename = f"route_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                        download_mimetype = "text/csv"
-                    elif report_format == "PDF":
-                        # Create a temporary markdown file
-                        with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as tmp:
-                            tmp.write(report_content.encode())
-                            tmp_path = tmp.name
-                        
-                        # We would ideally use a library like weasyprint to convert markdown to PDF
-                        # but for simplicity, just provide the markdown
-                        download_data = report_content.encode()
-                        download_filename = f"route_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-                        download_mimetype = "text/markdown"
-                        
-                        st.warning("PDF export is not fully implemented. Providing markdown format instead.")
-                
-                elif report_type == "Detailed Distance Matrix":
-                    # Create a distance matrix between all stops
-                    st.subheader("Distance Matrix")
-                    
-                    if all('latitude' in stop and 'longitude' in stop for stop in route):
-                        optimizer = RouteOptimizer()
-                        distance_matrix = optimizer._calculate_distance_matrix(route)
-                        
-                        # Convert to appropriate units
-                        if st.session_state.distance_units == "Miles":
-                            distance_matrix = distance_matrix / 1609.34  # meters to miles
-                            distance_unit = "miles"
-                        else:
-                            distance_matrix = distance_matrix / 1000  # meters to km
-                            distance_unit = "km"
-                        
-                        # Create a DataFrame with stop names
-                        stop_names = [stop.get('name', f"Stop {i+1}") for i, stop in enumerate(route)]
-                        df_distance = pd.DataFrame(distance_matrix, columns=stop_names, index=stop_names)
-                        
-                        # Display the matrix
-                        st.dataframe(df_distance.style.format("{:.2f}"))
-                        
-                        # Prepare for download
-                        if report_format == "CSV":
-                            csv_buffer = io.StringIO()
-                            df_distance.to_csv(csv_buffer)
-                            download_data = csv_buffer.getvalue().encode()
-                            download_filename = f"distance_matrix_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                            download_mimetype = "text/csv"
-                        else:
-                            # For other formats, still provide CSV
-                            csv_buffer = io.StringIO()
-                            df_distance.to_csv(csv_buffer)
-                            download_data = csv_buffer.getvalue().encode()
-                            download_filename = f"distance_matrix_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                            download_mimetype = "text/csv"
-                            st.warning(f"{report_format} export is not supported for distance matrix. Providing CSV instead.")
-                    else:
-                        st.error("Cannot create distance matrix: some stops are missing coordinates.")
-                        download_data = "Error: Missing coordinates".encode()
-                        download_filename = "error.txt"
-                        download_mimetype = "text/plain"
-                
-                elif report_type == "Summary Statistics":
-                    # Generate summary statistics
-                    st.subheader("Route Summary Statistics")
-                    
-                    stats = {
-                        "Total Stops": len(route),
-                        "Optimized Route": "Yes" if st.session_state.optimized_route else "No",
-                        "Generated Date": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    }
-                    
-                    # Calculate distance if we have coordinates
-                    if all('latitude' in stop and 'longitude' in stop for stop in route):
-                        optimizer = RouteOptimizer()
-                        total_distance = 0
-                        
-                        for i in range(len(route) - 1):
-                            total_distance += optimizer._haversine_distance(
-                                route[i]['latitude'], route[i]['longitude'],
-                                route[i+1]['latitude'], route[i+1]['longitude']
-                            )
-                        
-                        # Convert to appropriate units
-                        if st.session_state.distance_units == "Miles":
-                            total_distance = total_distance / 1609.34  # meters to miles
-                            distance_unit = "miles"
-                        else:
-                            total_distance = total_distance / 1000  # meters to km
-                            distance_unit = "km"
-                            
-                        stats["Total Distance"] = f"{total_distance:.2f} {distance_unit}"
-                        
-                        # Estimate average distance between stops
-                        avg_distance = total_distance / (len(route) - 1) if len(route) > 1 else 0
-                        stats["Average Distance Between Stops"] = f"{avg_distance:.2f} {distance_unit}"
-                    
-                    # Display statistics
-                    for key, value in stats.items():
-                        st.text(f"{key}: {value}")
-                    
-                    # Prepare for download
-                    if report_format == "CSV":
-                        csv_buffer = io.StringIO()
-                        csv_writer = csv.writer(csv_buffer)
-                        csv_writer.writerow(["Metric", "Value"])
-                        for key, value in stats.items():
-                            csv_writer.writerow([key, value])
-                        download_data = csv_buffer.getvalue().encode()
-                        download_filename = f"route_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                        download_mimetype = "text/csv"
-                    elif report_format == "Markdown":
-                        md_content = "# Route Summary Statistics\n\n"
-                        for key, value in stats.items():
-                            md_content += f"**{key}**: {value}\n\n"
-                        download_data = md_content.encode()
-                        download_filename = f"route_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-                        download_mimetype = "text/markdown"
-                    else:
-                        # Default to markdown for unsupported formats
-                        md_content = "# Route Summary Statistics\n\n"
-                        for key, value in stats.items():
-                            md_content += f"**{key}**: {value}\n\n"
-                        download_data = md_content.encode()
-                        download_filename = f"route_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-                        download_mimetype = "text/markdown"
-                        st.warning(f"{report_format} export is not fully implemented. Providing markdown format instead.")
-                
-                # Offer download option
-                st.download_button(
-                    label=f"Download Report as {report_format}",
-                    data=download_data,
-                    file_name=download_filename,
-                    mime=download_mimetype
-                )
-        
-        # Display a preview of the route
-        if st.session_state.stops:
-            st.subheader("Route Preview")
-            
-            route = st.session_state.optimized_route if st.session_state.optimized_route else st.session_state.stops
-            
-            # Create a simple table of stops
-            preview_data = []
-            for i, stop in enumerate(route):
-                preview_data.append({
-                    "Stop #": i+1,
-                    "Name": stop.get('name', 'Unnamed'),
-                    "Address": stop.get('address', 'No address')
-                })
-            
-            st.table(pd.DataFrame(preview_data))
-            
-            # Add a mini-map if we have coordinates
-            if all('latitude' in stop and 'longitude' in stop for stop in route):
-                st.subheader("Route Mini-Map")
-                mini_map = create_map(route, st.session_state.map_provider)
-                folium_static(mini_map, width=800, height=400)
+                            # Reports tab
+                            with tab3:
+                                st.header("Route Reports")
+                                
+                                # Only show report options if we have stops
+                                if not st.session_state.stops:
+                                    st.info("Add stops first to generate reports.")
+                                else:
+                                    col1, col2 = st.columns(2)
+                                    
+                                    with col1:
+                                        report_type = st.selectbox(
+                                            "Report Type",
+                                            ["Standard Route Report", "Detailed Distance Matrix", "Summary Statistics"]
+                                        )
+                                    
+                                    with col2:
+                                        report_format = st.selectbox(
+                                            "Export Format",
+                                            ["Markdown", "CSV", "PDF"]
+                                        )
+                                    
+                                    if st.button("Generate Report"):
+                                        with st.spinner("Generating report..."):
+                                            route = st.session_state.optimized_route if st.session_state.optimized_route else st.session_state.stops
+                                            
+                                            # Check if we have coordinates for distance calculations
+                                            if report_type in ["Standard Route Report", "Detailed Distance Matrix"] and not all('latitude' in stop and 'longitude' in stop for stop in route):
+                                                st.warning("Some stops are missing coordinates. Distance calculations will be omitted.")
+                                            
+                                            # Generate the appropriate report
+                                            if report_type == "Standard Route Report":
+                                                report_content = generate_report()
+                                                
+                                                # Display the report directly in the UI
+                                                st.subheader("Route Report")
+                                                st.markdown(report_content)
+                                                
+                                                # Prepare for download
+                                                if report_format == "Markdown":
+                                                    download_data = report_content.encode()
+                                                    download_filename = f"route_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+                                                    download_mimetype = "text/markdown"
+                                                elif report_format == "CSV":
+                                                    # Convert to CSV format
+                                                    csv_rows = []
+                                                    csv_rows.append(["Stop #", "Name", "Address", "Latitude", "Longitude", "Distance to Next"])
+                                                    
+                                                    optimizer = RouteOptimizer()
+                                                    for i, stop in enumerate(route):
+                                                        row = [
+                                                            i+1,
+                                                            stop.get('name', 'Unnamed'),
+                                                            stop.get('address', 'No address'),
+                                                            stop.get('latitude', ''),
+                                                            stop.get('longitude', '')
+                                                        ]
+                                                        
+                                                        # Add distance to next stop
+                                                        if i < len(route) - 1 and 'latitude' in stop and 'longitude' in stop and 'latitude' in route[i+1] and 'longitude' in route[i+1]:
+                                                            distance = optimizer._haversine_distance(
+                                                                stop['latitude'], stop['longitude'],
+                                                                route[i+1]['latitude'], route[i+1]['longitude']
+                                                            )
+                                                            
+                                                            # Convert to appropriate units
+                                                            if st.session_state.distance_units == "Miles":
+                                                                distance = distance / 1609.34  # meters to miles
+                                                            else:
+                                                                distance = distance / 1000  # meters to km
+                                                            
+                                                            row.append(f"{distance:.2f}")
+                                                        else:
+                                                            row.append('')
+                                                        
+                                                        csv_rows.append(row)
+                                                    
+                                                    # Convert to CSV string
+                                                    csv_buffer = io.StringIO()
+                                                    csv_writer = csv.writer(csv_buffer)
+                                                    csv_writer.writerows(csv_rows)
+                                                    download_data = csv_buffer.getvalue().encode()
+                                                    download_filename = f"route_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                                                    download_mimetype = "text/csv"
+                                                elif report_format == "PDF":
+                                                    # Create a temporary markdown file
+                                                    with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as tmp:
+                                                        tmp.write(report_content.encode())
+                                                        tmp_path = tmp.name
+                                                    
+                                                    # We would ideally use a library like weasyprint to convert markdown to PDF
+                                                    # but for simplicity, just provide the markdown
+                                                    download_data = report_content.encode()
+                                                    download_filename = f"route_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+                                                    download_mimetype = "text/markdown"
+                                                    
+                                                    st.warning("PDF export is not fully implemented. Providing markdown format instead.")
+                                            
+                                            elif report_type == "Detailed Distance Matrix":
+                                                # Create a distance matrix between all stops
+                                                st.subheader("Distance Matrix")
+                                                
+                                                if all('latitude' in stop and 'longitude' in stop for stop in route):
+                                                    optimizer = RouteOptimizer()
+                                                    distance_matrix = optimizer._calculate_distance_matrix(route)
+                                                    
+                                                    # Convert to appropriate units
+                                                    if st.session_state.distance_units == "Miles":
+                                                        distance_matrix = distance_matrix / 1609.34  # meters to miles
+                                                        distance_unit = "miles"
+                                                    else:
+                                                        distance_matrix = distance_matrix / 1000  # meters to km
+                                                        distance_unit = "km"
+                                                    
+                                                    # Create a DataFrame with stop names
+                                                    stop_names = [stop.get('name', f"Stop {i+1}") for i, stop in enumerate(route)]
+                                                    df_distance = pd.DataFrame(distance_matrix, columns=stop_names, index=stop_names)
+                                                    
+                                                    # Display the matrix
+                                                    st.dataframe(df_distance.style.format("{:.2f}"))
+                                                    
+                                                    # Prepare for download
+                                                    if report_format == "CSV":
+                                                        csv_buffer = io.StringIO()
+                                                        df_distance.to_csv(csv_buffer)
+                                                        download_data = csv_buffer.getvalue().encode()
+                                                        download_filename = f"distance_matrix_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                                                        download_mimetype = "text/csv"
+                                                    else:
+                                                        # For other formats, still provide CSV
+                                                        csv_buffer = io.StringIO()
+                                                        df_distance.to_csv(csv_buffer)
+                                                        download_data = csv_buffer.getvalue().encode()
+                                                        download_filename = f"distance_matrix_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                                                        download_mimetype = "text/csv"
+                                                        st.warning(f"{report_format} export is not supported for distance matrix. Providing CSV instead.")
+                                                else:
+                                                    st.error("Cannot create distance matrix: some stops are missing coordinates.")
+                                                    download_data = "Error: Missing coordinates".encode()
+                                                    download_filename = "error.txt"
+                                                    download_mimetype = "text/plain"
+                                            
+                                            elif report_type == "Summary Statistics":
+                                                # Generate summary statistics
+                                                st.subheader("Route Summary Statistics")
+                                                
+                                                stats = {
+                                                    "Total Stops": len(route),
+                                                    "Optimized Route": "Yes" if st.session_state.optimized_route else "No",
+                                                    "Generated Date": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                                }
+                                                
+                                                # Calculate distance if we have coordinates
+                                                if all('latitude' in stop and 'longitude' in stop for stop in route):
+                                                    optimizer = RouteOptimizer()
+                                                    total_distance = 0
+                                                    
+                                                    for i in range(len(route) - 1):
+                                                        total_distance += optimizer._haversine_distance(
+                                                            route[i]['latitude'], route[i]['longitude'],
+                                                            route[i+1]['latitude'], route[i+1]['longitude']
+                                                        )
+                                                    
+                                                    # Convert to appropriate units
+                                                    if st.session_state.distance_units == "Miles":
+                                                        total_distance = total_distance / 1609.34  # meters to miles
+                                                        distance_unit = "miles"
+                                                    else:
+                                                        total_distance = total_distance / 1000  # meters to km
+                                                        distance_unit = "km"
+                                                        
+                                                    stats["Total Distance"] = f"{total_distance:.2f} {distance_unit}"
+                                                    
+                                                    # Estimate average distance between stops
+                                                    avg_distance = total_distance / (len(route) - 1) if len(route) > 1 else 0
+                                                    stats["Average Distance Between Stops"] = f"{avg_distance:.2f} {distance_unit}"
+                                                
+                                                # Display statistics
+                                                for key, value in stats.items():
+                                                    st.text(f"{key}: {value}")
+                                                
+                                                # Prepare for download
+                                                if report_format == "CSV":
+                                                    csv_buffer = io.StringIO()
+                                                    csv_writer = csv.writer(csv_buffer)
+                                                    csv_writer.writerow(["Metric", "Value"])
+                                                    for key, value in stats.items():
+                                                        csv_writer.writerow([key, value])
+                                                    download_data = csv_buffer.getvalue().encode()
+                                                    download_filename = f"route_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                                                    download_mimetype = "text/csv"
+                                                elif report_format == "Markdown":
+                                                    md_content = "# Route Summary Statistics\n\n"
+                                                    for key, value in stats.items():
+                                                        md_content += f"**{key}**: {value}\n\n"
+                                                    download_data = md_content.encode()
+                                                    download_filename = f"route_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+                                                    download_mimetype = "text/markdown"
+                                                else:
+                                                    # Default to markdown for unsupported formats
+                                                    md_content = "# Route Summary Statistics\n\n"
+                                                    for key, value in stats.items():
+                                                        md_content += f"**{key}**: {value}\n\n"
+                                                    download_data = md_content.encode()
+                                                    download_filename = f"route_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+                                                    download_mimetype = "text/markdown"
+                                                    st.warning(f"{report_format} export is not fully implemented. Providing markdown format instead.")
+                                            
+                                            # Offer download option
+                                            st.download_button(
+                                                label=f"Download Report as {report_format}",
+                                                data=download_data,
+                                                file_name=download_filename,
+                                                mime=download_mimetype
+                                            )
+                                    
+                                    # Display a preview of the route
+                                    if st.session_state.stops:
+                                        st.subheader("Route Preview")
+                                        
+                                        route = st.session_state.optimized_route if st.session_state.optimized_route else st.session_state.stops
+                                        
+                                        # Create a simple table of stops
+                                        preview_data = []
+                                        for i, stop in enumerate(route):
+                                            preview_data.append({
+                                                "Stop #": i+1,
+                                                "Name": stop.get('name', 'Unnamed'),
+                                                "Address": stop.get('address', 'No address')
+                                            })
+                                        
+                                        st.table(pd.DataFrame(preview_data))
+                                        
+                                        # Add a mini-map if we have coordinates
+                                        if all('latitude' in stop and 'longitude' in stop for stop in route):
+                                            st.subheader("Route Mini-Map")
+                                            mini_map = create_map(route, st.session_state.map_provider)
+                                            folium_static(mini_map, width=800, height=400)
 
 # Run the app - this isn't needed when deploying with streamlit
 if __name__ == "__main__":
