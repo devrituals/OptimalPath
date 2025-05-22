@@ -208,46 +208,48 @@ if 'path_handler' not in st.session_state:
 # =====================================================
 def get_location():
     """Get location and store in session state."""
-    loc_js = f"""
+    loc_js = """
     <script>
-    function getLocation() {{
-        if (navigator.geolocation) {{
+    function getLocation() {
+        if (navigator.geolocation) {
             navigator.geolocation.getCurrentPosition(
-                function(position) {{
-                    // Send to Streamlit via query params
-                    const lat = position.coords.latitude;
-                    const lng = position.coords.longitude;
-                    window.parent.postMessage({{
-                        type: 'location',
-                        latitude: lat,
-                        longitude: lng
-                    }}, '*');
-                    document.getElementById('coords').innerHTML = 'Location detected: ' + lat.toFixed(6) + ', ' + lng.toFixed(6);
-                }},
-                function(error) {{
+                function(position) {
+                    document.getElementById('coords').innerHTML = 'Location detected: ' + 
+                        position.coords.latitude.toFixed(6) + ', ' + position.coords.longitude.toFixed(6);
+                    
+                    // Store in localStorage for Streamlit to read
+                    localStorage.setItem('current_lat', position.coords.latitude);
+                    localStorage.setItem('current_lng', position.coords.longitude);
+                },
+                function(error) {
                     document.getElementById('coords').innerHTML = 'Error: ' + error.message;
-                }}
+                }
             );
-        }}
-    }}
+        }
+    }
     getLocation();
     </script>
     <div id="coords">Getting location...</div>
     """
     
-    component_value = html(loc_js, height=100)
+    html(loc_js, height=100)
     
-    # Check if we received location data
-    if component_value and 'latitude' in component_value:
+    # Manual input for coordinates (temporary workaround)
+    col1, col2 = st.columns(2)
+    with col1:
+        lat = st.number_input("Latitude", value=0.0, format="%.6f")
+    with col2:
+        lng = st.number_input("Longitude", value=0.0, format="%.6f")
+    
+    if lat != 0.0 and lng != 0.0:
         st.session_state.current_location = {
-            'latitude': component_value['latitude'],
-            'longitude': component_value['longitude'],
+            'latitude': lat,
+            'longitude': lng,
             'timestamp': datetime.now()
         }
-        st.success("Location acquired!")
-        st.rerun()
+        return st.session_state.current_location
     
-    return st.session_state.current_location
+    return None
 
 def setup_location_tracking():
     """Set up JavaScript for continuous location tracking using watchPosition."""
