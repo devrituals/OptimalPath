@@ -494,10 +494,10 @@ def setup_location_tracking():
     if component_value:
         # New location data received from JavaScript
         st.session_state.current_location = {
-            'latitude': component_value.get('latitude'),
-            'longitude': component_value.get('longitude'),
-            'accuracy': component_value.get('accuracy'),
-            'speed': component_value.get('speed'), # Get speed from component_value
+            'latitude': component_value.get('latitude') if component_value else None,
+            'longitude': component_value.get('longitude') if component_value else None,
+            'accuracy': component_value.get('accuracy') if component_value else None,
+            'speed': component_value.get('speed') if component_value else None,
             'timestamp': datetime.fromisoformat(component_value.get('timestamp').replace("Z", "+00:00")) 
         }
         st.session_state.last_update_time = datetime.now()
