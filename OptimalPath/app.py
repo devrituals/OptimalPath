@@ -207,119 +207,31 @@ if 'path_handler' not in st.session_state:
 # HELPER FUNCTIONS
 # =====================================================
 def get_location():
-    """Use browser's geolocation API to get the user's current location with better error handling."""
-    # HTML and JavaScript to get user location with debugging
+    """Simple location getter with better error handling."""
     loc_js = """
     <script>
-    // Function to get current position
     function getLocation() {
-        console.log("Attempting to get location...");
         if (navigator.geolocation) {
-            console.log("Geolocation API is supported");
             navigator.geolocation.getCurrentPosition(
                 function(position) {
-                    // Success callback
-                    console.log("Location acquired successfully:", position.coords);
-                    document.getElementById('lat').value = position.coords.latitude;
-                    document.getElementById('lng').value = position.coords.longitude;
-                    document.getElementById('accuracy').value = position.coords.accuracy;
-                    document.getElementById('locationForm').submit();
+                    // Display coordinates directly in the page
+                    document.getElementById('coords').innerHTML = 
+                        'Lat: ' + position.coords.latitude + ', Lng: ' + position.coords.longitude;
                 },
                 function(error) {
-                    // Error callback
-                    console.error("Error getting location:", error);
-                    var errorDiv = document.getElementById('error');
-                    var errorMessage = "";
-                    switch(error.code) {
-                        case error.PERMISSION_DENIED:
-                            errorMessage = "Location permission denied. Please enable location access in your browser settings.";
-                            break;
-                        case error.POSITION_UNAVAILABLE:
-                            errorMessage = "Location information is unavailable. Please check if location services are enabled on your device.";
-                            break;
-                        case error.TIMEOUT:
-                            errorMessage = "The request to get location timed out. Please try again or check your internet connection.";
-                            break;
-                        case error.UNKNOWN_ERROR:
-                            errorMessage = "An unknown error occurred while accessing location. Error details: " + error.message;
-                            break;
-                    }
-                    errorDiv.innerHTML = errorMessage;
-                    document.getElementById('error-container').style.display = 'block';
-                },
-                {
-                    enableHighAccuracy: true,  // Use GPS if available
-                    timeout: 15000,            // Allow more time (15 seconds)
-                    maximumAge: 0              // Always get fresh position
+                    document.getElementById('coords').innerHTML = 'Error: ' + error.message;
                 }
             );
         } else {
-            console.error("Geolocation is not supported by this browser");
-            document.getElementById('error').innerHTML = "Geolocation is not supported by this browser. Please try a different browser like Chrome or Firefox.";
-            document.getElementById('error-container').style.display = 'block';
+            document.getElementById('coords').innerHTML = 'Geolocation not supported';
         }
     }
-    
-    // Check if we're running in a secure context
-    if (window.isSecureContext) {
-        console.log("Running in secure context, geolocation should work");
-    } else {
-        console.warn("Not running in secure context! Geolocation API requires HTTPS or localhost");
-        document.getElementById('error').innerHTML = "Geolocation requires a secure connection (HTTPS) or localhost. Your current connection appears insecure.";
-        document.getElementById('error-container').style.display = 'block';
-    }
-    
-    // Call getLocation on page load
     getLocation();
     </script>
-    
-    <form id="locationForm" method="POST">
-        <input type="hidden" id="lat" name="lat" />
-        <input type="hidden" id="lng" name="lng" />
-        <input type="hidden" id="accuracy" name="accuracy" />
-        <div id="error-container" style="display:none; padding: 10px; background-color: #ffcccc; margin: 10px 0;">
-            <p id="error" style="color: red; font-weight: bold;"></p>
-        </div>
-    </form>
+    <div id="coords">Getting location...</div>
     """
     
-    # Show debug info
-    st.info("Attempting to access your location. If prompted, please allow location access.")
-    
-    # Use Streamlit's html component to inject JavaScript
-    html(loc_js, height=150)  # Increased height to show errors
-    
-    # Check for form submission with location data
-    query_params = st.experimental_get_query_params()
-    if query_params:
-        st.write("Received query parameters:", query_params)  # Debug info
-        if 'lat' in query_params and 'lng' in query_params:
-            try:
-                lat = float(query_params['lat'][0])
-                lng = float(query_params['lng'][0])
-                accuracy = float(query_params['accuracy'][0]) if 'accuracy' in query_params else None
-                
-                # Update session state with current location
-                st.session_state.current_location = {
-                    'latitude': lat,
-                    'longitude': lng,
-                    'accuracy': accuracy,
-                    'timestamp': datetime.now()
-                }
-                
-                # Update last update time
-                st.session_state.last_update_time = datetime.now()
-                
-                # Clear query parameters to avoid reloading issues
-                st.experimental_set_query_params()
-                
-                return st.session_state.current_location
-            except (ValueError, KeyError) as e:
-                st.error(f"Error processing location data: {e}")
-                st.write("Failed to process:", query_params)  # Debug info
-                st.experimental_set_query_params()
-    
-    return st.session_state.current_location
+    return html(loc_js, height=100)
 
 def setup_location_tracking():
     """Set up JavaScript for continuous location tracking using watchPosition."""
