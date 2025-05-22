@@ -710,17 +710,20 @@ def create_map(route, route_paths=None, map_provider="OpenStreetMap", center_on_
 def get_turn_by_turn_directions(start_coords, end_coords, api_key=None):
     """Get turn-by-turn directions between two points."""
     if api_key:
-        # OpenRouteService directions
-        url = "https://api.openrouteservice.org/v2/directions/driving-car"
-        headers = {'Authorization': api_key}
-        body = {
-            "coordinates": [[start_coords[1], start_coords[0]], [end_coords[1], end_coords[0]]],
-            "instructions": True
-        }
-        response = requests.post(url, json=body, headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            return data['features'][0]['properties']['segments'][0]['steps']
+        try:
+            url = "https://api.openrouteservice.org/v2/directions/driving-car"
+            headers = {'Authorization': api_key}
+            body = {
+                "coordinates": [[start_coords[1], start_coords[0]], [end_coords[1], end_coords[0]]],
+                "instructions": True
+            }
+            response = requests.post(url, json=body, headers=headers)
+            if response.status_code == 200:
+                data = response.json()
+                if 'features' in data and len(data['features']) > 0:
+                    return data['features'][0]['properties']['segments'][0]['steps']
+        except Exception as e:
+            st.warning(f"Could not get directions: {e}")
     return None
 
 def _get_color_for_segment(index, total):
