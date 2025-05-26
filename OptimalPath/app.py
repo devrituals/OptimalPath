@@ -1485,8 +1485,21 @@ with tab5:
                         })
                     st.table(pd.DataFrame(route_display_data))
                     
-                    st.subheader("Live Tracking Route Map")
-                    
+                    # Button for manual override of route recalculation (placed before map)
+                    if st.button("Force Update Route From Current Location"):
+                        if current_loc_display: # Ensure current_loc_display is available
+                            with st.spinner("Manually updating route from current location..."):
+                                if path_handler.update_optimal_path(st.session_state.stops, current_loc_display):
+                                    st.success("Route manually updated successfully!")
+                                    st.rerun()
+                                else:
+                                    st.warning("Could not manually update route. Ensure original stops are defined.")
+                        else:
+                            st.warning("Current location data not available for manual update.")
+                
+                # MAP DISPLAY LOGIC STARTS HERE
+                st.subheader("Live Tracking Map")
+                if st.session_state.optimized_route: # Optimized route is available
                     map_center_coords = None
                     map_zoom_level = 12 # Default zoom for live tracking map
                     
@@ -1494,12 +1507,15 @@ with tab5:
                         map_center_coords = [current_loc_display['latitude'], current_loc_display['longitude']]
                         
                         # Dynamic zoom based on distance to next stop
-                        if distance_to_next is not None and distance_to_next > 0: # distance_to_next is in km
-                            if distance_to_next <= 0.5: map_zoom_level = 15
-                            elif distance_to_next <= 1: map_zoom_level = 14
-                            elif distance_to_next <= 5: map_zoom_level = 12
-                            elif distance_to_next <= 10: map_zoom_level = 11
-                            elif distance_to_next <= 20: map_zoom_level = 10
+                        # Ensure distance_to_next is defined; it's calculated earlier if optimized_route and current_loc_display exist
+                        dist_to_next_for_zoom = path_handler.get_distance_to_next_stop()[0] # Get only distance
+
+                        if dist_to_next_for_zoom is not None and dist_to_next_for_zoom > 0:
+                            if dist_to_next_for_zoom <= 0.5: map_zoom_level = 15
+                            elif dist_to_next_for_zoom <= 1: map_zoom_level = 14
+                            elif dist_to_next_for_zoom <= 5: map_zoom_level = 12
+                            elif dist_to_next_for_zoom <= 10: map_zoom_level = 11
+                            elif dist_to_next_for_zoom <= 20: map_zoom_level = 10
                             else: map_zoom_level = 9
                         else: # No next stop or at destination
                             map_zoom_level = 14 # Zoom in on current location
@@ -1512,22 +1528,33 @@ with tab5:
                         zoom_level=map_zoom_level
                     )
                     folium_static(live_route_map, width=800, height=500)
+
+                elif current_loc_display: # Only current location is available
+                    map_center_coords = [current_loc_display['latitude'], current_loc_display['longitude']]
+                    map_zoom_level = 14 # Default zoom for single point
+
+                    single_point_route = [{
+                        'name': 'Current Location', 
+                        'address': 'Your current position', 
+                        'latitude': current_loc_display['latitude'], 
+                        'longitude': current_loc_display['longitude']
+                    }]
                     
-                    # Button for manual override of route recalculation
-                    if st.button("Force Update Route From Current Location"):
-                        if current_loc_display: # Ensure current_loc_display is available
-                            with st.spinner("Manually updating route from current location..."):
-                                if path_handler.update_optimal_path(st.session_state.stops, current_loc_display):
-                                    st.success("Route manually updated successfully!")
-                                    st.rerun()
-                                else:
-                                    st.warning("Could not manually update route. Ensure original stops are defined.")
-                        else:
-                            st.warning("Current location data not available for manual update.")
-                else: # No st.session_state.optimized_route
-                    st.info("No optimized route is currently active. Please create and optimize a route in the 'Stop Manager' tab.")
-            else: # No st.session_state.current_location
-                st.warning("Tracking is enabled, but waiting for the first location data. Please ensure your browser has location access permission.")
+                    current_location_map = create_map(
+                        route=single_point_route,
+                        map_provider=st.session_state.map_provider,
+                        center_on_coords=map_center_coords,
+                        zoom_level=map_zoom_level
+                    )
+                    folium_static(current_location_map, width=800, height=500)
+                    st.info("Showing current location. Optimize a route to see the full path.")
+
+                else: # Neither optimized route nor current location is available
+                    st.info("Enable tracking and ensure location is detected, or optimize a route to see the live map here.")
+
+            else: # No st.session_state.current_location (but tracking is enabled)
+                st.warning("Tracking is enabled, but waiting for the first location data. Please ensure your browser has location access permission and location services are on.")
+        
         else: # Not st.session_state.tracking_enabled
             st.info("Live tracking is currently disabled. Enable it to see your location and use live route features.")
 
@@ -1694,6 +1721,10 @@ with tab1:
                 
                 # Add all stops
                 start_options.extend([stop['name'] for stop in st.session_state.stops])
+
+                # Display informational message if current location is not available
+                if st.session_state.current_location is None: # The check for len(st.session_state.stops) >= 2 is implicitly handled by the outer if block.
+                    st.info("Tip: Visit the 'Live Tracking' tab and use 'Get Current Location' or enable tracking to use your current position as a starting point.")
                 
                 start_option = st.selectbox(
                     "Choose starting point",
